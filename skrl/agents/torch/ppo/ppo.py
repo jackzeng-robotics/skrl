@@ -4,6 +4,7 @@ import copy
 import itertools
 import gymnasium
 from packaging import version
+import time
 
 import torch
 import torch.nn as nn
@@ -356,15 +357,14 @@ class PPO(Agent):
         :param timesteps: Number of timesteps
         :type timesteps: int
         """
+        start = time.time()
 
-        def compute_gae(
-            rewards: torch.Tensor,
-            dones: torch.Tensor,
-            values: torch.Tensor,
-            next_values: torch.Tensor,
-            discount_factor: float = 0.99,
-            lambda_coefficient: float = 0.95,
-        ) -> torch.Tensor:
+        def compute_gae(rewards: torch.Tensor,
+                        dones: torch.Tensor,
+                        values: torch.Tensor,
+                        next_values: torch.Tensor,
+                        discount_factor: float = 0.99,
+                        lambda_coefficient: float = 0.95) -> torch.Tensor:
             """Compute the Generalized Advantage Estimator (GAE)
 
             :param rewards: Rewards obtained by the agent
@@ -541,3 +541,5 @@ class PPO(Agent):
 
         if self._learning_rate_scheduler:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
+        
+        self.track_data("Performance / Learning time", time.time() - start)
