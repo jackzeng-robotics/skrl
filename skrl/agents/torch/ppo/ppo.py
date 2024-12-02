@@ -4,6 +4,7 @@ import copy
 import itertools
 import gym
 import gymnasium
+import time
 
 import torch
 import torch.nn as nn
@@ -314,6 +315,8 @@ class PPO(Agent):
         :param timesteps: Number of timesteps
         :type timesteps: int
         """
+        start = time.time()
+
         def compute_gae(rewards: torch.Tensor,
                         dones: torch.Tensor,
                         values: torch.Tensor,
@@ -466,3 +469,5 @@ class PPO(Agent):
 
         if self._learning_rate_scheduler:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
+        
+        self.track_data("Performance / Learning time", time.time() - start)

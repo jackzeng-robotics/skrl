@@ -3,7 +3,7 @@ from typing import List, Optional, Union
 import atexit
 import sys
 import tqdm
-
+import time
 import torch
 
 from skrl import config, logger
@@ -168,6 +168,8 @@ class Trainer:
 
         # reset env
         states, infos = self.env.reset()
+        start_collection = time.time()
+        start_fps = time.time()
 
         for timestep in tqdm.tqdm(range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout):
 
@@ -200,7 +202,13 @@ class Trainer:
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
-                            self.agents.track_data(f"Info / {k}", v.item())
+                            self.agents.track_data(f"{k}", v.item())
+                        else:
+                            self.agents.track_data(f"{k}", v)
+
+            if timestep % self.agents._rollouts == 0:
+                self.agents.track_data("Performance / Collection Time", self.agents._rollouts / (time.time() - start_collection))
+                start_collection = time.time()
 
             # post-interaction
             self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps)
@@ -214,6 +222,11 @@ class Trainer:
                         states, infos = self.env.reset()
                 else:
                     states = next_states
+
+            if timestep % 100 == 0:
+                self.agents.track_data("Performance / total FPS", 100 * self.env.num_envs / (time.time() - start_fps))
+                start_fps = time.time()
+            
 
     def single_agent_eval(self) -> None:
         """Evaluate agent
@@ -260,7 +273,9 @@ class Trainer:
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
-                            self.agents.track_data(f"Info / {k}", v.item())
+                            self.agents.track_data(f"{k}", v.item())
+                        else:
+                            self.agents.track_data(f"{k}", v)
 
             # reset environments
             if self.env.num_envs > 1:
@@ -271,6 +286,10 @@ class Trainer:
                         states, infos = self.env.reset()
                 else:
                     states = next_states
+
+            if timestep % 100 == 0:
+                self.agents.track_data("Performance/total FPS", 100 * self.env.num_envs / (time.time() - start_fps))
+                start_fps = time.time()
 
     def multi_agent_train(self) -> None:
         """Train multi-agents
@@ -291,7 +310,9 @@ class Trainer:
         # reset env
         states, infos = self.env.reset()
         shared_states = self.env.state()
-
+        start_collection = time.time()
+        start_fps = time.time()
+        
         for timestep in tqdm.tqdm(range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout):
 
             # pre-interaction
@@ -326,7 +347,13 @@ class Trainer:
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
-                            self.agents.track_data(f"Info / {k}", v.item())
+                            self.agents.track_data(f"{k}", v.item())
+                        else:
+                            self.agents.track_data(f"{k}", v)
+
+            if timestep % self.agents._rollouts == 0:
+                self.agents.track_data("Performance/Collection Time", self.agents._rollouts / (time.time() - start_collection))
+                start_collection = time.time()
 
             # post-interaction
             self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps)
@@ -339,6 +366,10 @@ class Trainer:
                 else:
                     states = next_states
                     shared_states = shared_next_states
+
+            if timestep % 100 == 0:
+                self.agents.track_data("Performance/total FPS", 100 * self.env.num_envs / (time.time() - start_fps))
+                start_fps = time.time()
 
     def multi_agent_eval(self) -> None:
         """Evaluate multi-agents
@@ -389,7 +420,9 @@ class Trainer:
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
-                            self.agents.track_data(f"Info / {k}", v.item())
+                            self.agents.track_data(f"{k}", v.item())
+                        else:
+                            self.agents.track_data(f"{k}", v)
 
                 # reset environments
                 if not self.env.agents:
