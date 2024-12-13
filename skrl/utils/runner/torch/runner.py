@@ -15,10 +15,11 @@ from skrl.resources.schedulers.torch import KLAdaptiveLR  # noqa
 from skrl.trainers.torch import SequentialTrainer, Trainer
 from skrl.utils import set_seed
 from skrl.utils.model_instantiators.torch import deterministic_model, gaussian_model, shared_model
-
+from gymnasium.spaces import Box
+import numpy as np
 
 class Runner:
-    def __init__(self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]) -> None:
+    def __init__(self, path: str) -> None:
         """Experiment runner
 
         Class that configures and instantiates skrl components to execute training/evaluation workflows in a few lines of code
@@ -26,8 +27,7 @@ class Runner:
         :param env: Environment to train on
         :param cfg: Runner configuration
         """
-        self._env = env
-        self._cfg = cfg
+        self._cfg = self.load_cfg_from_yaml(path)
 
         # set random seed
         set_seed(self._cfg.get("seed", None))
@@ -49,15 +49,8 @@ class Runner:
 
         self._cfg["agent"]["rewards_shaper"] = None  # FIXME: avoid 'dictionary changed size during iteration'
 
-        self._models = self._generate_models(self._env, copy.deepcopy(self._cfg))
-        self._agent = self._generate_agent(self._env, copy.deepcopy(self._cfg), self._models)
-        self._trainer = self._generate_trainer(self._env, copy.deepcopy(self._cfg), self._agent)
-
-    @property
-    def trainer(self) -> Trainer:
-        """Trainer instance
-        """
-        return self._trainer
+        self._models = self._generate_models(copy.deepcopy(self._cfg))
+        self._agent = self._generate_agent(copy.deepcopy(self._cfg), self._models)
 
     @property
     def agent(self) -> Agent:
@@ -131,7 +124,7 @@ class Runner:
 
         return update_dict(copy.deepcopy(cfg))
 
-    def _generate_models(self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]) -> Mapping[str, Mapping[str, Model]]:
+    def _generate_models(self, cfg: Mapping[str, Any]) -> Mapping[str, Mapping[str, Model]]:
         """Generate model instances according to the environment specification and the given config
 
         :param env: Wrapped environment
@@ -139,12 +132,12 @@ class Runner:
 
         :return: Model instances
         """
-        multi_agent = isinstance(env, MultiAgentEnvWrapper)
-        device = env.device
-        possible_agents = env.possible_agents if multi_agent else ["agent"]
-        state_spaces = env.state_spaces if multi_agent else {"agent": env.state_space}
-        observation_spaces = env.observation_spaces if multi_agent else {"agent": env.observation_space}
-        action_spaces = env.action_spaces if multi_agent else {"agent": env.action_space}
+        # multi_agent = isinstance(env, MultiAgentEnvWrapper)
+        device = "cpu"
+        possible_agents = ["agent"]
+        state_spaces = {"agent": None}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (137,), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (36,), np.float32)}
 
         try:
             agent_class = self._class(cfg["agent"]["class"])
@@ -254,7 +247,7 @@ class Runner:
 
         return models
 
-    def _generate_agent(self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any], models: Mapping[str, Mapping[str, Model]]) -> Agent:
+    def _generate_agent(self, cfg: Mapping[str, Any], models: Mapping[str, Mapping[str, Model]]) -> Agent:
         """Generate agent instance according to the environment specification and the given config and models
 
         :param env: Wrapped environment
@@ -263,13 +256,13 @@ class Runner:
 
         :return: Agent instances
         """
-        multi_agent = isinstance(env, MultiAgentEnvWrapper)
-        device = env.device
-        num_envs = env.num_envs
-        possible_agents = env.possible_agents if multi_agent else ["agent"]
-        state_spaces = env.state_spaces if multi_agent else {"agent": env.state_space}
-        observation_spaces = env.observation_spaces if multi_agent else {"agent": env.observation_space}
-        action_spaces = env.action_spaces if multi_agent else {"agent": env.action_space}
+        # multi_agent = isinstance(env, MultiAgentEnvWrapper)
+        num_envs = 1
+        device = "cpu"
+        possible_agents = ["agent"]
+        state_spaces = {"agent": None}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (137,), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (36,), np.float32)}
 
         # check for memory configuration (backward compatibility)
         if not "memory" in cfg:
@@ -345,25 +338,6 @@ class Runner:
                 "possible_agents": possible_agents,
             }
         return agent_class(cfg=agent_cfg, device=device, **agent_kwargs)
-
-    def _generate_trainer(self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any], agent: Agent) -> Trainer:
-        """Generate trainer instance according to the environment specification and the given config and agent
-
-        :param env: Wrapped environment
-        :param cfg: A configuration dictionary
-        :param agent: Agent's model instances
-
-        :return: Trainer instances
-        """
-        # get trainer class and remove 'class' field
-        try:
-            trainer_class = self._class(cfg["trainer"]["class"])
-            del cfg["trainer"]["class"]
-        except KeyError:
-            trainer_class = self._class("SequentialTrainer")
-            logger.warning("No 'class' field defined in 'trainer' cfg. 'SequentialTrainer' will be used as default")
-        # instantiate trainer
-        return trainer_class(env=env, agents=agent, cfg=cfg["trainer"])
 
     def run(self, mode: str = "train") -> None:
         """Run the training/evaluation
