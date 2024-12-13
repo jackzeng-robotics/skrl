@@ -12,9 +12,8 @@ from skrl.resources.schedulers.torch import KLAdaptiveLR  # noqa
 from skrl.trainers.torch import Trainer
 from skrl.utils import set_seed
 
-
 class Runner:
-    def __init__(self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]) -> None:
+    def __init__(self, path: str) -> None:
         """Experiment runner
 
         Class that configures and instantiates skrl components to execute training/evaluation workflows in a few lines of code
@@ -22,8 +21,7 @@ class Runner:
         :param env: Environment to train on
         :param cfg: Runner configuration
         """
-        self._env = env
-        self._cfg = cfg
+        self._cfg = self.load_cfg_from_yaml(path)
 
         # set random seed
         set_seed(self._cfg.get("seed", None))
@@ -202,12 +200,12 @@ class Runner:
 
         :return: Model instances
         """
-        multi_agent = isinstance(env, MultiAgentEnvWrapper)
-        device = env.device
-        possible_agents = env.possible_agents if multi_agent else ["agent"]
-        state_spaces = env.state_spaces if multi_agent else {"agent": env.state_space}
-        observation_spaces = env.observation_spaces if multi_agent else {"agent": env.observation_space}
-        action_spaces = env.action_spaces if multi_agent else {"agent": env.action_space}
+        # multi_agent = isinstance(env, MultiAgentEnvWrapper)
+        device = "cpu"
+        possible_agents = ["agent"]
+        state_spaces = {"agent": None}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (137,), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (36,), np.float32)}
 
         agent_class = cfg.get("agent", {}).get("class", "").lower()
 
@@ -506,13 +504,13 @@ class Runner:
 
         :return: Agent instances
         """
-        multi_agent = isinstance(env, MultiAgentEnvWrapper)
-        device = env.device
-        num_envs = env.num_envs
-        possible_agents = env.possible_agents if multi_agent else ["agent"]
-        state_spaces = env.state_spaces if multi_agent else {"agent": env.state_space}
-        observation_spaces = env.observation_spaces if multi_agent else {"agent": env.observation_space}
-        action_spaces = env.action_spaces if multi_agent else {"agent": env.action_space}
+        # multi_agent = isinstance(env, MultiAgentEnvWrapper)
+        num_envs = 1
+        device = "cpu"
+        possible_agents = ["agent"]
+        state_spaces = {"agent": None}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (137,), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (36,), np.float32)}
 
         agent_class = cfg.get("agent", {}).get("class", "").lower()
         if not agent_class:
