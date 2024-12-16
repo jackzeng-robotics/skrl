@@ -136,8 +136,8 @@ class Runner:
         device = "cpu"
         possible_agents = ["agent"]
         state_spaces = {"agent": None}
-        observation_spaces = {"agent": Box(-np.inf, np.inf, (137,), np.float32)}
-        action_spaces = {"agent": Box(-np.inf, np.inf, (36,), np.float32)}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
 
         try:
             agent_class = self._class(cfg["agent"]["class"])
@@ -261,8 +261,8 @@ class Runner:
         device = "cpu"
         possible_agents = ["agent"]
         state_spaces = {"agent": None}
-        observation_spaces = {"agent": Box(-np.inf, np.inf, (137,), np.float32)}
-        action_spaces = {"agent": Box(-np.inf, np.inf, (36,), np.float32)}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
 
         # check for memory configuration (backward compatibility)
         if not "memory" in cfg:
