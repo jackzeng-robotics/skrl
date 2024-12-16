@@ -204,8 +204,8 @@ class Runner:
         device = "cpu"
         possible_agents = ["agent"]
         state_spaces = {"agent": None}
-        observation_spaces = {"agent": Box(-np.inf, np.inf, (137,), np.float32)}
-        action_spaces = {"agent": Box(-np.inf, np.inf, (36,), np.float32)}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
 
         agent_class = cfg.get("agent", {}).get("class", "").lower()
 
@@ -509,8 +509,8 @@ class Runner:
         device = "cpu"
         possible_agents = ["agent"]
         state_spaces = {"agent": None}
-        observation_spaces = {"agent": Box(-np.inf, np.inf, (137,), np.float32)}
-        action_spaces = {"agent": Box(-np.inf, np.inf, (36,), np.float32)}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
 
         agent_class = cfg.get("agent", {}).get("class", "").lower()
         if not agent_class:
