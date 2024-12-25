@@ -65,6 +65,8 @@ class Agent:
         self.write_interval = self.cfg.get("experiment", {}).get("write_interval", "auto")
 
         self._track_rewards = collections.deque(maxlen=100)
+        # track last mean reward
+        self._track_mean_reward = None
         self._track_timesteps = collections.deque(maxlen=100)
         self._cumulative_rewards = None
         self._cumulative_timesteps = None
@@ -330,6 +332,7 @@ class Agent:
                 self.tracking_data["Reward / Total reward (max)"].append(np.max(track_rewards))
                 self.tracking_data["Reward / Total reward (min)"].append(np.min(track_rewards))
                 self.tracking_data["Reward / Total reward (mean)"].append(np.mean(track_rewards))
+                self._track_mean_reward = np.mean(track_rewards)
 
                 self.tracking_data["Episode / Total timesteps (max)"].append(np.max(track_timesteps))
                 self.tracking_data["Episode / Total timesteps (min)"].append(np.min(track_timesteps))
