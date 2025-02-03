@@ -37,7 +37,7 @@ class IsaacLabEnv(gym.Env):
 
         self._configure_gym_env_spaces()
 
-    # https://github.com/isaac-sim/IsaacLab/blob/main/source/extensions/omni.isaac.lab/omni/isaac/lab/envs/direct_rl_env.py
+    # https://github.com/isaac-sim/IsaacLab/blob/main/source/extensions/isaaclab/omni/isaac/lab/envs/direct_rl_env.py
     def _configure_gym_env_spaces(self):
         # set up spaces
         self.single_observation_space = gym.spaces.Dict()
@@ -87,7 +87,7 @@ class IsaacLabMultiAgentEnv:
 
         self._configure_env_spaces()
 
-    # https://github.com/isaac-sim/IsaacLab/blob/main/source/extensions/omni.isaac.lab/omni/isaac/lab/envs/direct_marl_env.py
+    # https://github.com/isaac-sim/IsaacLab/blob/main/source/extensions/isaaclab/omni/isaac/lab/envs/direct_marl_env.py
     def _configure_env_spaces(self):
         # set up observation and action spaces
         self.observation_spaces = {

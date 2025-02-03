@@ -130,7 +130,7 @@ def load_isaaclab_env(task_name: str = "",
     parser.add_argument("--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes.")
 
     # launch the simulation app
-    from omni.isaac.lab.app import AppLauncher
+    from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
@@ -140,8 +140,8 @@ def load_isaaclab_env(task_name: str = "",
     def close_the_simulator():
         app_launcher.app.close()
 
-    import omni.isaac.lab_tasks  # type: ignore
-    from omni.isaac.lab_tasks.utils import parse_env_cfg  # type: ignore
+    import isaaclab_tasks  # type: ignore
+    from isaaclab_tasks.utils import parse_env_cfg  # type: ignore
 
     cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs, use_fabric=not args.disable_fabric)
 
