@@ -16,6 +16,13 @@ from skrl.memories.torch import Memory
 from skrl.models.torch import Model
 from skrl.resources.schedulers.torch import KLAdaptiveLR
 
+def compute_grad_norm_after_clipping(parameters):
+    total_norm = 0.0
+    for p in parameters:
+        if p.grad is not None:
+            param_norm = p.grad.norm(2).item()  # Compute L2 norm of the clipped grad
+            total_norm += param_norm ** 2
+    return total_norm ** 0.5  # Square root for final L2 norm
 
 # fmt: off
 # [start-config-dict-torch]
@@ -434,6 +441,8 @@ class PPO(Agent):
         cumulative_entropy_loss = 0
         cumulative_value_loss = 0
 
+        actor_grad_norms = []
+
         # learning epochs
         for epoch in range(self._learning_epochs):
             kl_divergences = []
@@ -503,6 +512,8 @@ class PPO(Agent):
                     self.scaler.unscale_(self.optimizer)
                     if self.policy is self.value:
                         nn.utils.clip_grad_norm_(self.policy.parameters(), self._grad_norm_clip)
+                        clipped_grad_norm = compute_grad_norm_after_clipping(self.policy.parameters())
+                        actor_grad_norms.append(clipped_grad_norm)
                     else:
                         nn.utils.clip_grad_norm_(
                             itertools.chain(self.policy.parameters(), self.value.parameters()), self._grad_norm_clip
@@ -538,6 +549,7 @@ class PPO(Agent):
             )
 
         self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
+        self.track_data("Policy / Gradient norm", torch.tensor(actor_grad_norms).mean().item())
 
         if self._learning_rate_scheduler:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
