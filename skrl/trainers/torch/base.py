@@ -314,7 +314,7 @@ class Trainer:
                     states = next_states
 
             if timestep % 100 == 0:
-                self.agents.track_data("Performance/total FPS", 100 * self.env.num_envs / (time.time() - start_fps))
+                self.agents.track_data("Performance/ total FPS", 100 * self.env.num_envs / (time.time() - start_fps))
                 start_fps = time.time()
 
     def multi_agent_train(self) -> None:
@@ -380,7 +380,7 @@ class Trainer:
                             self.agents.track_data(f"{k}", v)
 
             if timestep % self.agents._rollouts == 0:
-                self.agents.track_data("Performance/Collection Time", self.agents._rollouts / (time.time() - start_collection))
+                self.agents.track_data("Performance / Collection Time", self.agents._rollouts / (time.time() - start_collection))
                 start_collection = time.time()
 
             # post-interaction
@@ -396,7 +396,7 @@ class Trainer:
                 shared_states = shared_next_states
 
             if timestep % 100 == 0:
-                self.agents.track_data("Performance/total FPS", 100 * self.env.num_envs / (time.time() - start_fps))
+                self.agents.track_data("Performance / total FPS", 100 * self.env.num_envs / (time.time() - start_fps))
                 start_fps = time.time()
 
     def multi_agent_eval(self) -> None:
