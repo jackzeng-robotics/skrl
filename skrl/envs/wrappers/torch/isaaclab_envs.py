@@ -133,7 +133,7 @@ class IsaacLabMultiAgentWrapper(MultiAgentEnvWrapper):
         :return: State
         :rtype: torch.Tensor
         """
-        return self._env.state()
+        return self._env.unwrapped.state()
 
     def render(self, *args, **kwargs) -> None:
         """Render the environment
