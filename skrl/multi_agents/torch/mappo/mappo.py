@@ -4,6 +4,7 @@ import copy
 import itertools
 import gym
 import gymnasium
+import time
 
 import torch
 import torch.nn as nn
@@ -65,6 +66,13 @@ MAPPO_DEFAULT_CONFIG = {
     }
 }
 # [end-config-dict-torch]
+def compute_grad_norm_after_clipping(parameters):
+    total_norm = 0.0
+    for p in parameters:
+        if p.grad is not None:
+            param_norm = p.grad.norm(2).item()  # Compute L2 norm of the clipped grad
+            total_norm += param_norm ** 2
+    return total_norm ** 0.5  # Square root for final L2 norm
 
 
 class MAPPO(MultiAgent):
@@ -348,6 +356,9 @@ class MAPPO(MultiAgent):
         :param timesteps: Number of timesteps
         :type timesteps: int
         """
+
+        start = time.time()
+
         def compute_gae(rewards: torch.Tensor,
                         dones: torch.Tensor,
                         values: torch.Tensor,
@@ -419,6 +430,9 @@ class MAPPO(MultiAgent):
             cumulative_policy_loss = 0
             cumulative_entropy_loss = 0
             cumulative_value_loss = 0
+            
+            actor_grad_norms = []
+            critic_grad_norms = []
 
             # learning epochs
             for epoch in range(self._learning_epochs[uid]):
@@ -477,6 +491,12 @@ class MAPPO(MultiAgent):
                             nn.utils.clip_grad_norm_(policy.parameters(), self._grad_norm_clip[uid])
                         else:
                             nn.utils.clip_grad_norm_(itertools.chain(policy.parameters(), value.parameters()), self._grad_norm_clip[uid])
+                            clipped_policy_grad_norm = compute_grad_norm_after_clipping(policy.parameters())
+                            actor_grad_norms.append(clipped_policy_grad_norm)
+                            
+                            clipped_critic_grad_norm = compute_grad_norm_after_clipping(value.parameters())
+                            critic_grad_norms.append(clipped_critic_grad_norm)
+                            
                     self.optimizers[uid].step()
 
                     # update cumulative losses
@@ -504,6 +524,12 @@ class MAPPO(MultiAgent):
                 self.track_data(f"Loss / Entropy loss ({uid})", cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]))
 
             self.track_data(f"Policy / Standard deviation ({uid})", policy.distribution(role="policy").stddev.mean().item())
+            
+            self.track_data(f"Policy / Gradient norm actor ({uid})", torch.tensor(actor_grad_norms).mean().item())
+            self.track_data(f"Policy / Gradient norm critic ({uid})", torch.tensor(critic_grad_norms).mean().item())
 
             if self._learning_rate_scheduler[uid]:
                 self.track_data(f"Learning / Learning rate ({uid})", self.schedulers[uid].get_last_lr()[0])
+                
+        self.track_data("Performance / Learning time", time.time() - start)
+
