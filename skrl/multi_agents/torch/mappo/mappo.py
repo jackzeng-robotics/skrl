@@ -129,21 +129,40 @@ class MAPPO(MultiAgent):
         self.shared_observation_spaces = shared_observation_spaces
 
         # models
-        self.policies = {uid: self.models[uid].get("policy", None) for uid in self.possible_agents}
-        self.values = {uid: self.models[uid].get("value", None) for uid in self.possible_agents}
+        if self.cfg["separate_actors"]:
+            self.policies = {uid: self.models[uid].get("policy", None) for uid in self.possible_agents}
+            self.values = {uid: self.models[uid].get("value", None) for uid in self.possible_agents}
 
-        for uid in self.possible_agents:
+            for uid in self.possible_agents:
+                # checkpoint models
+                self.checkpoint_modules[uid]["policy"] = self.policies[uid]
+                self.checkpoint_modules[uid]["value"] = self.values[uid]
+
+                # broadcast models' parameters in distributed runs
+                if config.torch.is_distributed:
+                    logger.info(f"Broadcasting models' parameters")
+                    if self.policies[uid] is not None:
+                        self.policies[uid].broadcast_parameters()
+                        if self.values[uid] is not None and self.policies[uid] is not self.values[uid]:
+                            self.values[uid].broadcast_parameters()
+        else:
+            self.agent_id = next(iter(self.possible_agents))
+            self.policies = {uid: self.models[uid].get("policy", None) for uid in self.possible_agents}
+            self.values = {uid: self.models[uid].get("value", None) for uid in self.possible_agents}
+
             # checkpoint models
-            self.checkpoint_modules[uid]["policy"] = self.policies[uid]
-            self.checkpoint_modules[uid]["value"] = self.values[uid]
+            for uid in self.possible_agents:
+                # checkpoint models
+                self.checkpoint_modules[uid]["policy"] = self.policies[uid]
+                self.checkpoint_modules[uid]["value"] = self.values[uid]
 
-            # broadcast models' parameters in distributed runs
-            if config.torch.is_distributed:
-                logger.info(f"Broadcasting models' parameters")
-                if self.policies[uid] is not None:
-                    self.policies[uid].broadcast_parameters()
-                    if self.values[uid] is not None and self.policies[uid] is not self.values[uid]:
-                        self.values[uid].broadcast_parameters()
+            # # broadcast models' parameters in distributed runs
+            # if config.torch.is_distributed:
+            #     logger.info(f"Broadcasting models' parameters")
+            #     if self.policies[uid] is not None:
+            #         self.policies[uid].broadcast_parameters()
+            #         if self.values[uid] is not None and self.policies[uid] is not self.values[uid]:
+            #             self.values[uid].broadcast_parameters()
 
         # configuration
         self._learning_epochs = self._as_dict(self.cfg["learning_epochs"])
@@ -194,44 +213,96 @@ class MAPPO(MultiAgent):
         self.optimizers = {}
         self.schedulers = {}
 
-        for uid in self.possible_agents:
-            policy = self.policies[uid]
-            value = self.values[uid]
+        if self.cfg["separate_actors"]:
+            for uid in self.possible_agents:
+                policy = self.policies[uid]
+                value = self.values[uid]
+                if policy is not None and value is not None:
+                    if policy is value:
+                        optimizer = torch.optim.Adam(policy.parameters(), lr=self._learning_rate[uid])
+                    else:
+                        optimizer = torch.optim.Adam(
+                            itertools.chain(policy.parameters(), value.parameters()), lr=self._learning_rate[uid]
+                        )
+                    self.optimizers[uid] = optimizer
+                    if self._learning_rate_scheduler[uid] is not None:
+                        self.schedulers[uid] = self._learning_rate_scheduler[uid](
+                            optimizer, **self._learning_rate_scheduler_kwargs[uid]
+                        )
+
+                self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
+
+                # set up preprocessors
+                if self._state_preprocessor[uid] is not None:
+                    self._state_preprocessor[uid] = self._state_preprocessor[uid](**self._state_preprocessor_kwargs[uid])
+                    self.checkpoint_modules[uid]["state_preprocessor"] = self._state_preprocessor[uid]
+                else:
+                    self._state_preprocessor[uid] = self._empty_preprocessor
+
+                if self._shared_state_preprocessor[uid] is not None:
+                    self._shared_state_preprocessor[uid] = self._shared_state_preprocessor[uid](
+                        **self._shared_state_preprocessor_kwargs[uid]
+                    )
+                    self.checkpoint_modules[uid]["shared_state_preprocessor"] = self._shared_state_preprocessor[uid]
+                else:
+                    self._shared_state_preprocessor[uid] = self._empty_preprocessor
+
+                if self._value_preprocessor[uid] is not None:
+                    self._value_preprocessor[uid] = self._value_preprocessor[uid](**self._value_preprocessor_kwargs[uid])
+                    self.checkpoint_modules[uid]["value_preprocessor"] = self._value_preprocessor[uid]
+                else:
+                    self._value_preprocessor[uid] = self._empty_preprocessor
+        else:
+            policy = self.policies[self.agent_id]
+            value = self.values[self.agent_id]
             if policy is not None and value is not None:
                 if policy is value:
-                    optimizer = torch.optim.Adam(policy.parameters(), lr=self._learning_rate[uid])
+                    optimizer = torch.optim.Adam(policy.parameters(), lr=self._learning_rate[self.agent_id])
                 else:
                     optimizer = torch.optim.Adam(
-                        itertools.chain(policy.parameters(), value.parameters()), lr=self._learning_rate[uid]
+                        itertools.chain(policy.parameters(), value.parameters()), lr=self._learning_rate[self.agent_id]
                     )
-                self.optimizers[uid] = optimizer
-                if self._learning_rate_scheduler[uid] is not None:
-                    self.schedulers[uid] = self._learning_rate_scheduler[uid](
-                        optimizer, **self._learning_rate_scheduler_kwargs[uid]
+                    
+                if self._learning_rate_scheduler[self.agent_id] is not None:
+                    scheduler = self._learning_rate_scheduler[self.agent_id](
+                        optimizer, **self._learning_rate_scheduler_kwargs[self.agent_id]
                     )
-
-            self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
+                for uid in self.possible_agents:
+                    self.optimizers[uid] = optimizer
+                    self.schedulers[uid] = scheduler
+                    self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
 
             # set up preprocessors
-            if self._state_preprocessor[uid] is not None:
-                self._state_preprocessor[uid] = self._state_preprocessor[uid](**self._state_preprocessor_kwargs[uid])
-                self.checkpoint_modules[uid]["state_preprocessor"] = self._state_preprocessor[uid]
+            if self._state_preprocessor[self.agent_id] is not None:
+                state_preprocessor = self._state_preprocessor[self.agent_id](**self._state_preprocessor_kwargs[self.agent_id])
+                for uid in self.possible_agents:
+                    self._state_preprocessor[uid] = state_preprocessor
+                    self.checkpoint_modules[uid]["state_preprocessor"] = self._state_preprocessor[uid]
             else:
-                self._state_preprocessor[uid] = self._empty_preprocessor
+                for uid in self.possible_agents:
+                    self._state_preprocessor[uid] = self._empty_preprocessor
 
-            if self._shared_state_preprocessor[uid] is not None:
-                self._shared_state_preprocessor[uid] = self._shared_state_preprocessor[uid](
-                    **self._shared_state_preprocessor_kwargs[uid]
+            if self._shared_state_preprocessor[self.agent_id] is not None:
+                shared_state_preprocessor = self._shared_state_preprocessor[self.agent_id](
+                    **self._shared_state_preprocessor_kwargs[self.agent_id]
                 )
-                self.checkpoint_modules[uid]["shared_state_preprocessor"] = self._shared_state_preprocessor[uid]
-            else:
-                self._shared_state_preprocessor[uid] = self._empty_preprocessor
+                for uid in self.possible_agents:
+                    self._shared_state_preprocessor[uid] = shared_state_preprocessor
+                    self.checkpoint_modules[uid]["shared_state_preprocessor"] = self._shared_state_preprocessor[uid]
 
-            if self._value_preprocessor[uid] is not None:
-                self._value_preprocessor[uid] = self._value_preprocessor[uid](**self._value_preprocessor_kwargs[uid])
-                self.checkpoint_modules[uid]["value_preprocessor"] = self._value_preprocessor[uid]
             else:
-                self._value_preprocessor[uid] = self._empty_preprocessor
+                for uid in self.possible_agents:
+                    self._shared_state_preprocessor[uid] = self._empty_preprocessor
+
+            if self._value_preprocessor[self.agent_id] is not None:
+                value_preprocessor = self._value_preprocessor[self.agent_id](**self._value_preprocessor_kwargs[self.agent_id])
+                for uid in self.possible_agents:
+                    self._value_preprocessor[uid] = value_preprocessor
+                    self.checkpoint_modules[uid]["value_preprocessor"] = self._value_preprocessor[uid]
+            else:
+                for uid in self.possible_agents:
+                    self._value_preprocessor[uid] = self._empty_preprocessor
+                    
 
     def init(self, trainer_cfg: Optional[Mapping[str, Any]] = None) -> None:
         """Initialize the agent"""
@@ -458,37 +529,228 @@ class MAPPO(MultiAgent):
 
             return returns, advantages
 
-        for uid in self.possible_agents:
-            policy = self.policies[uid]
-            value = self.values[uid]
-            memory = self.memories[uid]
+        if self.cfg["separate_actors"]:
+            for uid in self.possible_agents:
+                policy = self.policies[uid]
+                value = self.values[uid]
+                memory = self.memories[uid]
 
+                # compute returns and advantages
+                with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+                    value.train(False)
+                    last_values, _, _ = value.act(
+                        {"states": self._shared_state_preprocessor[uid](self._current_shared_next_states.float())},
+                        role="value",
+                    )
+                    value.train(True)
+                last_values = self._value_preprocessor[uid](last_values, inverse=True)
+
+                values = memory.get_tensor_by_name("values")
+                returns, advantages = compute_gae(
+                    rewards=memory.get_tensor_by_name("rewards"),
+                    dones=memory.get_tensor_by_name("terminated") | memory.get_tensor_by_name("truncated"),
+                    values=values,
+                    next_values=last_values,
+                    discount_factor=self._discount_factor[uid],
+                    lambda_coefficient=self._lambda[uid],
+                )
+
+                memory.set_tensor_by_name("values", self._value_preprocessor[uid](values, train=True))
+                memory.set_tensor_by_name("returns", self._value_preprocessor[uid](returns, train=True))
+                memory.set_tensor_by_name("advantages", advantages)
+
+                # sample mini-batches from memory
+                sampled_batches = memory.sample_all(names=self._tensors_names, mini_batches=self._mini_batches[uid])
+
+                cumulative_policy_loss = 0
+                cumulative_entropy_loss = 0
+                cumulative_value_loss = 0
+                
+                actor_grad_norms = []
+                critic_grad_norms = []
+
+                # learning epochs
+                for epoch in range(self._learning_epochs[uid]):
+                    kl_divergences = []
+
+                    # mini-batches loop
+                    for (
+                        sampled_states,
+                        sampled_shared_states,
+                        sampled_actions,
+                        sampled_log_prob,
+                        sampled_values,
+                        sampled_returns,
+                        sampled_advantages,
+                    ) in sampled_batches:
+
+                        with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+
+                            sampled_states = self._state_preprocessor[uid](sampled_states, train=not epoch)
+                            sampled_shared_states = self._shared_state_preprocessor[uid](
+                                sampled_shared_states, train=not epoch
+                            )
+
+                            _, next_log_prob, _ = policy.act(
+                                {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
+                            )
+
+                            # compute approximate KL divergence
+                            with torch.no_grad():
+                                ratio = next_log_prob - sampled_log_prob
+                                kl_divergence = ((torch.exp(ratio) - 1) - ratio).mean()
+                                kl_divergences.append(kl_divergence)
+
+                            # early stopping with KL divergence
+                            if self._kl_threshold[uid] and kl_divergence > self._kl_threshold[uid]:
+                                break
+
+                            # compute entropy loss
+                            if self._entropy_loss_scale[uid]:
+                                entropy_loss = -self._entropy_loss_scale[uid] * policy.get_entropy(role="policy").mean()
+                            else:
+                                entropy_loss = 0
+
+                            # compute policy loss
+                            ratio = torch.exp(next_log_prob - sampled_log_prob)
+                            surrogate = sampled_advantages * ratio
+                            surrogate_clipped = sampled_advantages * torch.clip(
+                                ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
+                            )
+
+                            policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
+
+                            # compute value loss
+                            predicted_values, _, _ = value.act({"states": sampled_shared_states}, role="value")
+
+                            if self._clip_predicted_values:
+                                predicted_values = sampled_values + torch.clip(
+                                    predicted_values - sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
+                                )
+                            value_loss = self._value_loss_scale[uid] * F.mse_loss(sampled_returns, predicted_values)
+
+                        # optimization step
+                        self.optimizers[uid].zero_grad()
+                        self.scaler.scale(policy_loss + entropy_loss + value_loss).backward()
+
+                        if config.torch.is_distributed:
+                            policy.reduce_parameters()
+                            if policy is not value:
+                                value.reduce_parameters()
+
+                        if self._grad_norm_clip[uid] > 0:
+                            self.scaler.unscale_(self.optimizers[uid])
+                            if policy is value:
+                                nn.utils.clip_grad_norm_(policy.parameters(), self._grad_norm_clip[uid])
+                            else:
+                                nn.utils.clip_grad_norm_(
+                                    itertools.chain(policy.parameters(), value.parameters()), self._grad_norm_clip[uid]
+                                )
+                                clipped_policy_grad_norm = compute_grad_norm_after_clipping(policy.parameters())
+                                actor_grad_norms.append(clipped_policy_grad_norm)
+                                
+                                clipped_critic_grad_norm = compute_grad_norm_after_clipping(value.parameters())
+                                critic_grad_norms.append(clipped_critic_grad_norm)
+
+                        self.scaler.step(self.optimizers[uid])
+                        self.scaler.update()
+
+                        # update cumulative losses
+                        cumulative_policy_loss += policy_loss.item()
+                        cumulative_value_loss += value_loss.item()
+                        if self._entropy_loss_scale[uid]:
+                            cumulative_entropy_loss += entropy_loss.item()
+
+                    # update learning rate
+                    if self._learning_rate_scheduler[uid]:
+                        if isinstance(self.schedulers[uid], KLAdaptiveLR):
+                            kl = torch.tensor(kl_divergences, device=self.device).mean()
+                            # reduce (collect from all workers/processes) KL in distributed runs
+                            if config.torch.is_distributed:
+                                torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
+                                kl /= config.torch.world_size
+                            self.schedulers[uid].step(kl.item())
+                        else:
+                            self.schedulers[uid].step()
+
+                # record data
+                self.track_data(
+                    f"Loss / Policy loss ({uid})",
+                    cumulative_policy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                )
+                self.track_data(
+                    f"Loss / Value loss ({uid})",
+                    cumulative_value_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                )
+                if self._entropy_loss_scale:
+                    self.track_data(
+                        f"Loss / Entropy loss ({uid})",
+                        cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                    )
+
+                self.track_data(
+                    f"Policy / Standard deviation ({uid})", policy.distribution(role="policy").stddev.mean().item()
+                )
+                
+                self.track_data(f"Policy / Gradient norm actor ({uid})", torch.tensor(actor_grad_norms).mean().item())
+                self.track_data(f"Policy / Gradient norm critic ({uid})", torch.tensor(critic_grad_norms).mean().item())
+
+                if self._learning_rate_scheduler[uid]:
+                    self.track_data(f"Learning / Learning rate ({uid})", self.schedulers[uid].get_last_lr()[0])
+        else:
+            policy = self.policies[self.agent_id]
+            value = self.values[self.agent_id]
+ 
             # compute returns and advantages
             with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
                 value.train(False)
                 last_values, _, _ = value.act(
-                    {"states": self._shared_state_preprocessor[uid](self._current_shared_next_states.float())},
+                    {"states": self._shared_state_preprocessor[self.agent_id](self._current_shared_next_states.float())},
                     role="value",
                 )
                 value.train(True)
-            last_values = self._value_preprocessor[uid](last_values, inverse=True)
+            last_values = self._value_preprocessor[self.agent_id](last_values, inverse=True)
 
-            values = memory.get_tensor_by_name("values")
-            returns, advantages = compute_gae(
-                rewards=memory.get_tensor_by_name("rewards"),
-                dones=memory.get_tensor_by_name("terminated") | memory.get_tensor_by_name("truncated"),
-                values=values,
-                next_values=last_values,
-                discount_factor=self._discount_factor[uid],
-                lambda_coefficient=self._lambda[uid],
-            )
+            sampled_batches_agents={}
 
-            memory.set_tensor_by_name("values", self._value_preprocessor[uid](values, train=True))
-            memory.set_tensor_by_name("returns", self._value_preprocessor[uid](returns, train=True))
-            memory.set_tensor_by_name("advantages", advantages)
+            sampled_batches_agents = {}
 
-            # sample mini-batches from memory
-            sampled_batches = memory.sample_all(names=self._tensors_names, mini_batches=self._mini_batches[uid])
+            # Step 1: Collect minibatches per agent
+            for uid in self.possible_agents:
+                memory = self.memories[uid]
+                values = memory.get_tensor_by_name("values")
+                returns, advantages = compute_gae(
+                    rewards=memory.get_tensor_by_name("rewards"),
+                    dones=memory.get_tensor_by_name("terminated") | memory.get_tensor_by_name("truncated"),
+                    values=values,
+                    next_values=last_values,
+                    discount_factor=self._discount_factor[uid],
+                    lambda_coefficient=self._lambda[uid],
+                )
+
+                memory.set_tensor_by_name("values", self._value_preprocessor[uid](values, train=True))
+                memory.set_tensor_by_name("returns", self._value_preprocessor[uid](returns, train=True))
+                memory.set_tensor_by_name("advantages", advantages)
+
+                # Store minibatches
+                sampled_batches_agents[uid] = memory.sample_all(names=self._tensors_names, mini_batches=self._mini_batches[uid])
+
+            # Step 2: Merge minibatches and concatenate tensors in one loop
+            num_minibatches = self._mini_batches[self.agent_id]
+            merged_minibatches = [[] for _ in range(num_minibatches)]
+
+            for batch_memory in sampled_batches_agents.values():
+                for batch_idx, batch in enumerate(batch_memory):
+                    if not merged_minibatches[batch_idx]:  
+                        merged_minibatches[batch_idx] = list(batch)  # Initialize with first agent's tensors
+                    else:
+                        for tensor_idx, tensor in enumerate(batch):
+                            merged_minibatches[batch_idx][tensor_idx] = torch.cat(
+                                (merged_minibatches[batch_idx][tensor_idx], tensor), dim=0
+                            )
+
+            # Step 3: Convert lists to tuples
+            sampled_batches = [tuple(batch) for batch in merged_minibatches]
 
             cumulative_policy_loss = 0
             cumulative_entropy_loss = 0
@@ -498,7 +760,7 @@ class MAPPO(MultiAgent):
             critic_grad_norms = []
 
             # learning epochs
-            for epoch in range(self._learning_epochs[uid]):
+            for epoch in range(self._learning_epochs[self.agent_id]):
                 kl_divergences = []
 
                 # mini-batches loop
@@ -514,8 +776,8 @@ class MAPPO(MultiAgent):
 
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
 
-                        sampled_states = self._state_preprocessor[uid](sampled_states, train=not epoch)
-                        sampled_shared_states = self._shared_state_preprocessor[uid](
+                        sampled_states = self._state_preprocessor[self.agent_id](sampled_states, train=not epoch)
+                        sampled_shared_states = self._shared_state_preprocessor[self.agent_id](
                             sampled_shared_states, train=not epoch
                         )
 
@@ -530,12 +792,12 @@ class MAPPO(MultiAgent):
                             kl_divergences.append(kl_divergence)
 
                         # early stopping with KL divergence
-                        if self._kl_threshold[uid] and kl_divergence > self._kl_threshold[uid]:
+                        if self._kl_threshold[self.agent_id] and kl_divergence > self._kl_threshold[self.agent_id]:
                             break
 
                         # compute entropy loss
-                        if self._entropy_loss_scale[uid]:
-                            entropy_loss = -self._entropy_loss_scale[uid] * policy.get_entropy(role="policy").mean()
+                        if self._entropy_loss_scale[self.agent_id]:
+                            entropy_loss = -self._entropy_loss_scale[self.agent_id] * policy.get_entropy(role="policy").mean()
                         else:
                             entropy_loss = 0
 
@@ -543,7 +805,7 @@ class MAPPO(MultiAgent):
                         ratio = torch.exp(next_log_prob - sampled_log_prob)
                         surrogate = sampled_advantages * ratio
                         surrogate_clipped = sampled_advantages * torch.clip(
-                            ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
+                            ratio, 1.0 - self._ratio_clip[self.agent_id], 1.0 + self._ratio_clip[self.agent_id]
                         )
 
                         policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
@@ -553,12 +815,12 @@ class MAPPO(MultiAgent):
 
                         if self._clip_predicted_values:
                             predicted_values = sampled_values + torch.clip(
-                                predicted_values - sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
+                                predicted_values - sampled_values, min=-self._value_clip[self.agent_id], max=self._value_clip[self.agent_id]
                             )
-                        value_loss = self._value_loss_scale[uid] * F.mse_loss(sampled_returns, predicted_values)
+                        value_loss = self._value_loss_scale[self.agent_id] * F.mse_loss(sampled_returns, predicted_values)
 
                     # optimization step
-                    self.optimizers[uid].zero_grad()
+                    self.optimizers[self.agent_id].zero_grad()
                     self.scaler.scale(policy_loss + entropy_loss + value_loss).backward()
 
                     if config.torch.is_distributed:
@@ -566,13 +828,13 @@ class MAPPO(MultiAgent):
                         if policy is not value:
                             value.reduce_parameters()
 
-                    if self._grad_norm_clip[uid] > 0:
-                        self.scaler.unscale_(self.optimizers[uid])
+                    if self._grad_norm_clip[self.agent_id] > 0:
+                        self.scaler.unscale_(self.optimizers[self.agent_id])
                         if policy is value:
-                            nn.utils.clip_grad_norm_(policy.parameters(), self._grad_norm_clip[uid])
+                            nn.utils.clip_grad_norm_(policy.parameters(), self._grad_norm_clip[self.agent_id])
                         else:
                             nn.utils.clip_grad_norm_(
-                                itertools.chain(policy.parameters(), value.parameters()), self._grad_norm_clip[uid]
+                                itertools.chain(policy.parameters(), value.parameters()), self._grad_norm_clip[self.agent_id]
                             )
                             clipped_policy_grad_norm = compute_grad_norm_after_clipping(policy.parameters())
                             actor_grad_norms.append(clipped_policy_grad_norm)
@@ -580,51 +842,52 @@ class MAPPO(MultiAgent):
                             clipped_critic_grad_norm = compute_grad_norm_after_clipping(value.parameters())
                             critic_grad_norms.append(clipped_critic_grad_norm)
 
-                    self.scaler.step(self.optimizers[uid])
+                    self.scaler.step(self.optimizers[self.agent_id])
                     self.scaler.update()
 
                     # update cumulative losses
                     cumulative_policy_loss += policy_loss.item()
                     cumulative_value_loss += value_loss.item()
-                    if self._entropy_loss_scale[uid]:
+                    if self._entropy_loss_scale[self.agent_id]:
                         cumulative_entropy_loss += entropy_loss.item()
 
                 # update learning rate
-                if self._learning_rate_scheduler[uid]:
-                    if isinstance(self.schedulers[uid], KLAdaptiveLR):
+                if self._learning_rate_scheduler[self.agent_id]:
+                    if isinstance(self.schedulers[self.agent_id], KLAdaptiveLR):
                         kl = torch.tensor(kl_divergences, device=self.device).mean()
                         # reduce (collect from all workers/processes) KL in distributed runs
                         if config.torch.is_distributed:
                             torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
                             kl /= config.torch.world_size
-                        self.schedulers[uid].step(kl.item())
+                        self.schedulers[self.agent_id].step(kl.item())
                     else:
-                        self.schedulers[uid].step()
+                        self.schedulers[self.agent_id].step()
 
+        
             # record data
             self.track_data(
-                f"Loss / Policy loss ({uid})",
+                f"Loss / Policy loss",
                 cumulative_policy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
             )
             self.track_data(
-                f"Loss / Value loss ({uid})",
+                f"Loss / Value loss",
                 cumulative_value_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
             )
             if self._entropy_loss_scale:
                 self.track_data(
-                    f"Loss / Entropy loss ({uid})",
+                    f"Loss / Entropy loss",
                     cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
                 )
 
             self.track_data(
-                f"Policy / Standard deviation ({uid})", policy.distribution(role="policy").stddev.mean().item()
+                f"Policy / Standard deviation", policy.distribution(role="policy").stddev.mean().item()
             )
             
-            self.track_data(f"Policy / Gradient norm actor ({uid})", torch.tensor(actor_grad_norms).mean().item())
-            self.track_data(f"Policy / Gradient norm critic ({uid})", torch.tensor(critic_grad_norms).mean().item())
+            self.track_data(f"Policy / Gradient norm actor", torch.tensor(actor_grad_norms).mean().item())
+            self.track_data(f"Policy / Gradient norm critic", torch.tensor(critic_grad_norms).mean().item())
 
             if self._learning_rate_scheduler[uid]:
-                self.track_data(f"Learning / Learning rate ({uid})", self.schedulers[uid].get_last_lr()[0])
+                self.track_data(f"Learning / Learning rate", self.schedulers[uid].get_last_lr()[0])
                 
         self.track_data("Performance / Learning time", time.time() - start)
 
