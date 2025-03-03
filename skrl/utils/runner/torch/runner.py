@@ -362,7 +362,89 @@ class Runner:
 
         # TODO: generalize this later
         if separate:
-            if not separate_actors and not separate_critics:
+            if not separate_critics and separate_actors:
+                for role in models_cfg:
+                    if role =="policy":
+                        # instantiate models
+                        for agent_id in possible_agents:
+                            # get instantiator function and remove 'class' key
+                            model_class = models_cfg[role].get("class")
+                            model_class = self._component(model_class)
+                            # get specific spaces according to agent/model cfg
+                            observation_space = observation_spaces[agent_id]
+                            if agent_class == "mappo" and role == "value":
+                                observation_space = state_spaces[agent_id]
+                            if agent_class == "amp" and role == "discriminator":
+                                try:
+                                    observation_space = env.amp_observation_space
+                                except Exception as e:
+                                    logger.warning(
+                                        "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
+                                    )
+                            # print model source
+                            source = model_class(
+                                observation_space=observation_space,
+                                action_space=action_spaces[agent_id],
+                                device=device,
+                                **self._process_cfg(models_cfg[role]),
+                                return_source=True,
+                            )
+                            print("==================================================")
+                            print(f"Model (role): {role}")
+                            print("==================================================\n")
+                            print(source)
+                            print("--------------------------------------------------")
+                            # instantiate model
+                            models[agent_id][role] = model_class(
+                                observation_space=observation_space,
+                                action_space=action_spaces[agent_id],
+                                device=device,
+                                **self._process_cfg(models_cfg[role]),
+                            )
+                    elif role == "value":
+                        # get instantiator function and remove 'class' key
+                        model_class = models_cfg[role].get("class")
+                        if not model_class:
+                            raise ValueError(f"No 'class' field defined in 'models:{role}' cfg")
+                        del models_cfg[role]["class"]
+                        model_class = self._component(model_class)
+                        # get specific spaces according to agent/model cfg
+                        observation_space = observation_spaces[next(iter(possible_agents))] # assume the observation space is the same for all agents
+                        if agent_class == "mappo" and role == "value":
+                            observation_space = state_spaces[next(iter(possible_agents))] # assume the state space is the same for all agents
+                        if agent_class == "amp" and role == "discriminator":
+                            try:
+                                observation_space = env.amp_observation_space
+                            except Exception as e:
+                                logger.warning(
+                                    "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
+                                )
+                        # print model source
+                        source = model_class(
+                            observation_space=observation_space,
+                            action_space=action_spaces[next(iter(possible_agents))], # assume the action space is the same for all agents
+                            device=device,
+                            **self._process_cfg(models_cfg[role]),
+                            return_source=True,
+                        )
+                        print("==================================================")
+                        print(f"Model (role): {role}")
+                        print("==================================================\n")
+                        print(source)
+                        print("--------------------------------------------------")
+                        # instantiate model
+                        current_model = model_class(
+                            observation_space=observation_space,
+                            action_space=action_spaces[next(iter(possible_agents))], # assume the action space is the same for all agents
+                            device=device,
+                            **self._process_cfg(models_cfg[role]),
+                        )
+                        current_model.init_state_dict(role)
+                        
+                        for agent_id in possible_agents:
+                            models[agent_id][role] = current_model
+
+            elif not separate_actors and not separate_critics:
                 for role in models_cfg:
                     # get instantiator function and remove 'class' key
                     model_class = models_cfg[role].get("class")

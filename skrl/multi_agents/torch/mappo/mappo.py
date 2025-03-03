@@ -269,7 +269,8 @@ class MAPPO(MultiAgent):
                     )
                 for uid in self.possible_agents:
                     self.optimizers[uid] = optimizer
-                    self.schedulers[uid] = scheduler
+                    if self._learning_rate_scheduler[self.agent_id] is not None:
+                        self.schedulers[uid] = scheduler
                     self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
 
             # set up preprocessors
@@ -710,8 +711,6 @@ class MAPPO(MultiAgent):
                 )
                 value.train(True)
             last_values = self._value_preprocessor[self.agent_id](last_values, inverse=True)
-
-            sampled_batches_agents={}
 
             sampled_batches_agents = {}
 
