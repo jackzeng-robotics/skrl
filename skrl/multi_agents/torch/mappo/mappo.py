@@ -181,6 +181,8 @@ class MAPPO(MultiAgent):
         self._kl_threshold = self._as_dict(self.cfg["kl_threshold"])
 
         self._learning_rate = self._as_dict(self.cfg["learning_rate"])
+        self._learning_rate_actor = self._as_dict(self.cfg["learning_rate_actor"])
+        self._learning_rate_critic = self._as_dict(self.cfg["learning_rate_critic"])
         self._learning_rate_scheduler = self._as_dict(self.cfg["learning_rate_scheduler"])
         self._learning_rate_scheduler_kwargs = self._as_dict(self.cfg["learning_rate_scheduler_kwargs"])
 
@@ -259,16 +261,18 @@ class MAPPO(MultiAgent):
                 if policy is value:
                     optimizer = torch.optim.Adam(policy.parameters(), lr=self._learning_rate[self.agent_id])
                 else:
-                    optimizer = torch.optim.Adam(
-                        itertools.chain(policy.parameters(), value.parameters()), lr=self._learning_rate[self.agent_id]
-                    )
-                    
+                    optimizer_actor = torch.optim.Adam(policy.parameters(), lr=self._learning_rate_actor[self.agent_id])
+                    optimizer_critic = torch.optim.Adam(value.parameters(), lr=self._learning_rate_critic[self.agent_id])
+
                 if self._learning_rate_scheduler[self.agent_id] is not None:
                     scheduler = self._learning_rate_scheduler[self.agent_id](
                         optimizer, **self._learning_rate_scheduler_kwargs[self.agent_id]
                     )
                 for uid in self.possible_agents:
-                    self.optimizers[uid] = optimizer
+                    if policy is value:
+                        self.optimizers[uid] = optimizer
+                    else:
+                        self.optimizers[uid] = (optimizer_actor, optimizer_critic)
                     if self._learning_rate_scheduler[self.agent_id] is not None:
                         self.schedulers[uid] = scheduler
                     self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
@@ -628,7 +632,12 @@ class MAPPO(MultiAgent):
                             value_loss = self._value_loss_scale[uid] * F.mse_loss(sampled_returns, predicted_values)
 
                         # optimization step
-                        self.optimizers[uid].zero_grad()
+                        if policy is value:
+                            self.optimizers[uid].zero_grad()
+                        else:
+                            self.optimizers[uid][0].zero_grad()
+                            self.optimizers[uid][1].zero_grad()
+
                         self.scaler.scale(policy_loss + entropy_loss + value_loss).backward()
 
                         if config.torch.is_distributed:
@@ -637,10 +646,14 @@ class MAPPO(MultiAgent):
                                 value.reduce_parameters()
 
                         if self._grad_norm_clip[uid] > 0:
-                            self.scaler.unscale_(self.optimizers[uid])
                             if policy is value:
+                                self.scaler.unscale_(self.optimizers[uid])
                                 nn.utils.clip_grad_norm_(policy.parameters(), self._grad_norm_clip[uid])
+                                self.scaler.step(self.optimizers[uid])
+                                self.scaler.update()
                             else:
+                                self.scaler.unscale_(self.optimizers[uid][0])
+                                self.scaler.unscale_(self.optimizers[uid][1])
                                 nn.utils.clip_grad_norm_(
                                     itertools.chain(policy.parameters(), value.parameters()), self._grad_norm_clip[uid]
                                 )
@@ -650,8 +663,9 @@ class MAPPO(MultiAgent):
                                 clipped_critic_grad_norm = compute_grad_norm_after_clipping(value.parameters())
                                 critic_grad_norms.append(clipped_critic_grad_norm)
 
-                        self.scaler.step(self.optimizers[uid])
-                        self.scaler.update()
+                                self.scaler.step(self.optimizers[uid][0])
+                                self.scaler.step(self.optimizers[uid][1])
+                                self.scaler.update()
 
                         # update cumulative losses
                         cumulative_policy_loss += policy_loss.item()
@@ -816,7 +830,12 @@ class MAPPO(MultiAgent):
                         value_loss = self._value_loss_scale[self.agent_id] * F.mse_loss(sampled_returns, predicted_values)
 
                     # optimization step
-                    self.optimizers[self.agent_id].zero_grad()
+                    if policy is value:
+                        self.optimizers[uid].zero_grad()
+                    else:
+                        self.optimizers[uid][0].zero_grad()
+                        self.optimizers[uid][1].zero_grad()
+
                     self.scaler.scale(policy_loss + entropy_loss + value_loss).backward()
 
                     if config.torch.is_distributed:
@@ -824,22 +843,26 @@ class MAPPO(MultiAgent):
                         if policy is not value:
                             value.reduce_parameters()
 
-                    if self._grad_norm_clip[self.agent_id] > 0:
-                        self.scaler.unscale_(self.optimizers[self.agent_id])
+                    if self._grad_norm_clip[uid] > 0:
                         if policy is value:
-                            nn.utils.clip_grad_norm_(policy.parameters(), self._grad_norm_clip[self.agent_id])
+                            self.scaler.unscale_(self.optimizers[uid])
+                            nn.utils.clip_grad_norm_(policy.parameters(), self._grad_norm_clip[uid])
+                            self.scaler.step(self.optimizers[uid])
+                            self.scaler.update()
                         else:
+                            self.scaler.unscale_(self.optimizers[uid][0])
+                            self.scaler.unscale_(self.optimizers[uid][1])
                             nn.utils.clip_grad_norm_(
-                                itertools.chain(policy.parameters(), value.parameters()), self._grad_norm_clip[self.agent_id]
+                                itertools.chain(policy.parameters(), value.parameters()), self._grad_norm_clip[uid]
                             )
                             clipped_policy_grad_norm = compute_grad_norm_after_clipping(policy.parameters())
                             actor_grad_norms.append(clipped_policy_grad_norm)
                             
                             clipped_critic_grad_norm = compute_grad_norm_after_clipping(value.parameters())
                             critic_grad_norms.append(clipped_critic_grad_norm)
-
-                    self.scaler.step(self.optimizers[self.agent_id])
-                    self.scaler.update()
+                            self.scaler.step(self.optimizers[uid][0])
+                            self.scaler.step(self.optimizers[uid][1])
+                            self.scaler.update()
 
                     # update cumulative losses
                     cumulative_policy_loss += policy_loss.item()
