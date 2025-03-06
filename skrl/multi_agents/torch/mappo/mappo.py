@@ -125,7 +125,7 @@ class MAPPO(MultiAgent):
             device=device,
             cfg=_cfg,
         )
-
+        self._track_mean_reward = None
         self.shared_observation_spaces = shared_observation_spaces
 
         # models
@@ -414,7 +414,7 @@ class MAPPO(MultiAgent):
         super().record_transition(
             states, actions, rewards, next_states, terminated, truncated, infos, timestep, timesteps
         )
-
+        mean_rewards = 0
         if self.memories:
             shared_states = infos["shared_states"]
             self._current_shared_next_states = infos["shared_next_states"]
@@ -434,6 +434,8 @@ class MAPPO(MultiAgent):
                 # time-limit (truncation) bootstrapping
                 if self._time_limit_bootstrap[uid]:
                     rewards[uid] += self._discount_factor[uid] * values * truncated[uid]
+                
+                mean_rewards += rewards[uid].mean().item()
 
                 # storage transition in memory
                 self.memories[uid].add_samples(
@@ -447,6 +449,8 @@ class MAPPO(MultiAgent):
                     values=values,
                     shared_states=shared_states,
                 )
+            
+            self._track_mean_reward = mean_rewards
 
     def pre_interaction(self, timestep: int, timesteps: int) -> None:
         """Callback called before the interaction with the environment
