@@ -271,11 +271,13 @@ class MAPPO(MultiAgent):
                 for uid in self.possible_agents:
                     if policy is value:
                         self.optimizers[uid] = optimizer
+                        self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
                     else:
                         self.optimizers[uid] = (optimizer_actor, optimizer_critic)
+                        self.checkpoint_modules[uid]["optimizer_actor"] = self.optimizers[uid][0]
+                        self.checkpoint_modules[uid]["optimizer_critic"] = self.optimizers[uid][1]
                     if self._learning_rate_scheduler[self.agent_id] is not None:
                         self.schedulers[uid] = scheduler
-                    self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
 
             # set up preprocessors
             if self._state_preprocessor[self.agent_id] is not None:
