@@ -4,15 +4,12 @@ import copy
 
 from skrl import logger
 from skrl.agents.torch import Agent
-from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
 from skrl.envs.wrappers.torch import MultiAgentEnvWrapper, Wrapper
-from skrl.memories.torch import RandomMemory
 from skrl.models.torch import Model
-from skrl.multi_agents.torch.ippo import IPPO, IPPO_DEFAULT_CONFIG
-from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_DEFAULT_CONFIG
+from skrl.resources.noises.torch import GaussianNoise, OrnsteinUhlenbeckNoise  # noqa
 from skrl.resources.preprocessors.torch import RunningStandardScaler  # noqa
 from skrl.resources.schedulers.torch import KLAdaptiveLR  # noqa
-from skrl.trainers.torch import SequentialTrainer, Trainer
+from skrl.trainers.torch import Trainer
 from skrl.utils import set_seed
 from skrl.utils.model_instantiators.torch import deterministic_model, gaussian_model, shared_model
 from gymnasium.spaces import Box
@@ -32,30 +29,25 @@ class Runner:
         # set random seed
         set_seed(self._cfg.get("seed", None))
 
-        self._class_mapping = {
-            # model
-            "gaussianmixin": gaussian_model,
-            "deterministicmixin": deterministic_model,
-            "shared": shared_model,
-            # memory
-            "randommemory": RandomMemory,
-            # agent
-            "ppo": PPO,
-            "ippo": IPPO,
-            "mappo": MAPPO,
-            # trainer
-            "sequentialtrainer": SequentialTrainer,
-        }
-
         self._cfg["agent"]["rewards_shaper"] = None  # FIXME: avoid 'dictionary changed size during iteration'
 
+        if self._cfg["models"]["CTDE"]:
+            self._models = self._generate_models_CTDE(self._env, copy.deepcopy(self._cfg))
+        else:
+            self._models = self._generate_models(self._env, copy.deepcopy(self._cfg))
+        self._agent = self._generate_agent(self._env, copy.deepcopy(self._cfg), self._models)
+        self._trainer = self._generate_trainer(self._env, copy.deepcopy(self._cfg), self._agent)
+
+    @property
+    def trainer(self) -> Trainer:
+        """Trainer instance"""
+        return self._trainer
         self._models = self._generate_models(copy.deepcopy(self._cfg))
         self._agent = self._generate_agent(copy.deepcopy(self._cfg), self._models)
 
     @property
     def agent(self) -> Agent:
-        """Agent instance
-        """
+        """Agent instance"""
         return self._agent
 
     @staticmethod
@@ -79,14 +71,88 @@ class Runner:
             logger.error(f"Loading yaml error: {e}")
             return {}
 
-    def _class(self, value: str) -> Type:
-        """Get skrl component class (e.g.: agent, trainer, etc..) from string identifier
+    def _component(self, name: str) -> Type:
+        """Get skrl component (e.g.: agent, trainer, etc..) from string identifier
 
-        :return: skrl component class
+        :return: skrl component
         """
-        if value.lower() in self._class_mapping:
-            return self._class_mapping[value.lower()]
-        raise ValueError(f"Unknown class '{value}' in runner cfg")
+        component = None
+        name = name.lower()
+        # model
+        if name == "gaussianmixin":
+            from skrl.utils.model_instantiators.torch import gaussian_model as component
+        elif name == "categoricalmixin":
+            from skrl.utils.model_instantiators.torch import categorical_model as component
+        elif name == "deterministicmixin":
+            from skrl.utils.model_instantiators.torch import deterministic_model as component
+        elif name == "multivariategaussianmixin":
+            from skrl.utils.model_instantiators.torch import multivariate_gaussian_model as component
+        elif name == "shared":
+            from skrl.utils.model_instantiators.torch import shared_model as component
+        # memory
+        elif name == "randommemory":
+            from skrl.memories.torch import RandomMemory as component
+        # agent
+        elif name in ["a2c", "a2c_default_config"]:
+            from skrl.agents.torch.a2c import A2C, A2C_DEFAULT_CONFIG
+
+            component = A2C_DEFAULT_CONFIG if "default_config" in name else A2C
+        elif name in ["amp", "amp_default_config"]:
+            from skrl.agents.torch.amp import AMP, AMP_DEFAULT_CONFIG
+
+            component = AMP_DEFAULT_CONFIG if "default_config" in name else AMP
+        elif name in ["cem", "cem_default_config"]:
+            from skrl.agents.torch.cem import CEM, CEM_DEFAULT_CONFIG
+
+            component = CEM_DEFAULT_CONFIG if "default_config" in name else CEM
+        elif name in ["ddpg", "ddpg_default_config"]:
+            from skrl.agents.torch.ddpg import DDPG, DDPG_DEFAULT_CONFIG
+
+            component = DDPG_DEFAULT_CONFIG if "default_config" in name else DDPG
+        elif name in ["ddqn", "ddqn_default_config"]:
+            from skrl.agents.torch.dqn import DDQN, DDQN_DEFAULT_CONFIG
+
+            component = DDQN_DEFAULT_CONFIG if "default_config" in name else DDQN
+        elif name in ["dqn", "dqn_default_config"]:
+            from skrl.agents.torch.dqn import DQN, DQN_DEFAULT_CONFIG
+
+            component = DQN_DEFAULT_CONFIG if "default_config" in name else DQN
+        elif name in ["ppo", "ppo_default_config"]:
+            from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
+
+            component = PPO_DEFAULT_CONFIG if "default_config" in name else PPO
+        elif name in ["rpo", "rpo_default_config"]:
+            from skrl.agents.torch.rpo import RPO, RPO_DEFAULT_CONFIG
+
+            component = RPO_DEFAULT_CONFIG if "default_config" in name else RPO
+        elif name in ["sac", "sac_default_config"]:
+            from skrl.agents.torch.sac import SAC, SAC_DEFAULT_CONFIG
+
+            component = SAC_DEFAULT_CONFIG if "default_config" in name else SAC
+        elif name in ["td3", "td3_default_config"]:
+            from skrl.agents.torch.td3 import TD3, TD3_DEFAULT_CONFIG
+
+            component = TD3_DEFAULT_CONFIG if "default_config" in name else TD3
+        elif name in ["trpo", "trpo_default_config"]:
+            from skrl.agents.torch.trpo import TRPO, TRPO_DEFAULT_CONFIG
+
+            component = TRPO_DEFAULT_CONFIG if "default_config" in name else TRPO
+        # multi-agent
+        elif name in ["ippo", "ippo_default_config"]:
+            from skrl.multi_agents.torch.ippo import IPPO, IPPO_DEFAULT_CONFIG
+
+            component = IPPO_DEFAULT_CONFIG if "default_config" in name else IPPO
+        elif name in ["mappo", "mappo_default_config"]:
+            from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_DEFAULT_CONFIG
+
+            component = MAPPO_DEFAULT_CONFIG if "default_config" in name else MAPPO
+        # trainer
+        elif name == "sequentialtrainer":
+            from skrl.trainers.torch import SequentialTrainer as component
+
+        if component is None:
+            raise ValueError(f"Unknown component '{name}' in runner cfg")
+        return component
 
     def _process_cfg(self, cfg: dict) -> dict:
         """Convert simple types to skrl classes/components
@@ -100,6 +166,9 @@ class Runner:
             "shared_state_preprocessor",
             "state_preprocessor",
             "value_preprocessor",
+            "amp_state_preprocessor",
+            "noise",
+            "smooth_regularization_noise",
         ]
 
         def reward_shaper_function(scale):
@@ -114,7 +183,7 @@ class Runner:
                     update_dict(value)
                 else:
                     if key in _direct_eval:
-                        if type(d[key]) is str:
+                        if isinstance(value, str):
                             d[key] = eval(value)
                     elif key.endswith("_kwargs"):
                         d[key] = value if value is not None else {}
@@ -139,17 +208,11 @@ class Runner:
         observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
         action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
 
-        try:
-            agent_class = self._class(cfg["agent"]["class"])
-            del cfg["agent"]["class"]
-        except KeyError:
-            agent_class = self._class("PPO")
-            logger.warning("No 'class' field defined in 'agent' cfg. 'PPO' will be used as default")
+        agent_class = cfg.get("agent", {}).get("class", "").lower()
 
         # instantiate models
         models = {}
         for agent_id in possible_agents:
-            _cfg = copy.deepcopy(cfg)
             models[agent_id] = {}
             # non-shared models
             if _cfg["models"]["separate"]:
@@ -266,14 +329,16 @@ class Runner:
 
         # check for memory configuration (backward compatibility)
         if not "memory" in cfg:
-            logger.warning("Deprecation warning: No 'memory' field defined in cfg. Using the default generated configuration")
+            logger.warning(
+                "Deprecation warning: No 'memory' field defined in cfg. Using the default generated configuration"
+            )
             cfg["memory"] = {"class": "RandomMemory", "memory_size": -1}
         # get memory class and remove 'class' field
         try:
-            memory_class = self._class(cfg["memory"]["class"])
+            memory_class = self._component(cfg["memory"]["class"])
             del cfg["memory"]["class"]
         except KeyError:
-            memory_class = self._class("RandomMemory")
+            memory_class = self._component("RandomMemory")
             logger.warning("No 'class' field defined in 'memory' cfg. 'RandomMemory' will be used as default")
         memories = {}
         # instantiate memory
@@ -282,20 +347,67 @@ class Runner:
         for agent_id in possible_agents:
             memories[agent_id] = memory_class(num_envs=num_envs, device=device, **self._process_cfg(cfg["memory"]))
 
-        # instantiate agent
-        try:
-            agent_class = self._class(cfg["agent"]["class"])
-            del cfg["agent"]["class"]
-        except KeyError:
-            agent_class = self._class("PPO")
-            logger.warning("No 'class' field defined in 'agent' cfg. 'PPO' will be used as default")
         # single-agent configuration and instantiation
-        if agent_class in [PPO]:
+        if agent_class in ["amp"]:
             agent_id = possible_agents[0]
-            agent_cfg = PPO_DEFAULT_CONFIG.copy()
+            try:
+                amp_observation_space = env.amp_observation_space
+            except Exception as e:
+                logger.warning(
+                    "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
+                )
+                amp_observation_space = observation_spaces[agent_id]
+            agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
             agent_cfg.update(self._process_cfg(cfg["agent"]))
             agent_cfg["state_preprocessor_kwargs"].update({"size": observation_spaces[agent_id], "device": device})
             agent_cfg["value_preprocessor_kwargs"].update({"size": 1, "device": device})
+            agent_cfg["amp_state_preprocessor_kwargs"].update({"size": amp_observation_space, "device": device})
+
+            motion_dataset = None
+            if cfg.get("motion_dataset"):
+                motion_dataset_class = cfg["motion_dataset"].get("class")
+                if not motion_dataset_class:
+                    raise ValueError(f"No 'class' field defined in 'motion_dataset' cfg")
+                del cfg["motion_dataset"]["class"]
+                motion_dataset = self._component(motion_dataset_class)(
+                    device=device, **self._process_cfg(cfg.get("motion_dataset", {}))
+                )
+            reply_buffer = None
+            if cfg.get("reply_buffer"):
+                reply_buffer_class = cfg["reply_buffer"].get("class")
+                if not reply_buffer_class:
+                    raise ValueError(f"No 'class' field defined in 'reply_buffer' cfg")
+                del cfg["reply_buffer"]["class"]
+                reply_buffer = self._component(reply_buffer_class)(
+                    device=device, **self._process_cfg(cfg.get("reply_buffer", {}))
+                )
+
+            agent_kwargs = {
+                "models": models[agent_id],
+                "memory": memories[agent_id],
+                "observation_space": observation_spaces[agent_id],
+                "action_space": action_spaces[agent_id],
+                "amp_observation_space": amp_observation_space,
+                "motion_dataset": motion_dataset,
+                "reply_buffer": reply_buffer,
+                "collect_reference_motions": lambda num_samples: env.collect_reference_motions(num_samples),
+            }
+        elif agent_class in ["a2c", "cem", "ddpg", "ddqn", "dqn", "ppo", "rpo", "sac", "td3", "trpo"]:
+            agent_id = possible_agents[0]
+            agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
+            agent_cfg.update(self._process_cfg(cfg["agent"]))
+            agent_cfg.get("state_preprocessor_kwargs", {}).update(
+                {"size": observation_spaces[agent_id], "device": device}
+            )
+            agent_cfg.get("value_preprocessor_kwargs", {}).update({"size": 1, "device": device})
+            if agent_cfg.get("exploration", {}).get("noise", None):
+                agent_cfg["exploration"]["noise"] = agent_cfg["exploration"]["noise"](
+                    **agent_cfg["exploration"].get("noise_kwargs", {})
+                )
+            if agent_cfg.get("smooth_regularization_noise", None):
+                agent_cfg["smooth_regularization_noise"] = agent_cfg["smooth_regularization_noise"](
+                    **agent_cfg.get("smooth_regularization_noise_kwargs", {})
+                )
             agent_kwargs = {
                 "models": models[agent_id],
                 "memory": memories[agent_id],
@@ -303,13 +415,12 @@ class Runner:
                 "action_space": action_spaces[agent_id],
             }
         # multi-agent configuration and instantiation
-        elif agent_class in [IPPO]:
-            agent_cfg = IPPO_DEFAULT_CONFIG.copy()
+        elif agent_class in ["ippo"]:
+            agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
             agent_cfg.update(self._process_cfg(cfg["agent"]))
-            agent_cfg["state_preprocessor_kwargs"].update({
-                agent_id: {"size": observation_spaces[agent_id], "device": device}
-                for agent_id in possible_agents
-            })
+            agent_cfg["state_preprocessor_kwargs"].update(
+                {agent_id: {"size": observation_spaces[agent_id], "device": device} for agent_id in possible_agents}
+            )
             agent_cfg["value_preprocessor_kwargs"].update({"size": 1, "device": device})
             agent_kwargs = {
                 "models": models,
@@ -318,13 +429,12 @@ class Runner:
                 "action_spaces": action_spaces,
                 "possible_agents": possible_agents,
             }
-        elif agent_class in [MAPPO]:
-            agent_cfg = MAPPO_DEFAULT_CONFIG.copy()
+        elif agent_class in ["mappo"]:
+            agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
             agent_cfg.update(self._process_cfg(cfg["agent"]))
-            agent_cfg["state_preprocessor_kwargs"].update({
-                agent_id: {"size": observation_spaces[agent_id], "device": device}
-                for agent_id in possible_agents
-            })
+            agent_cfg["state_preprocessor_kwargs"].update(
+                {agent_id: {"size": observation_spaces[agent_id], "device": device} for agent_id in possible_agents}
+            )
             agent_cfg["shared_state_preprocessor_kwargs"].update(
                 {agent_id: {"size": state_spaces[agent_id], "device": device} for agent_id in possible_agents}
             )
@@ -337,7 +447,7 @@ class Runner:
                 "shared_observation_spaces": state_spaces,
                 "possible_agents": possible_agents,
             }
-        return agent_class(cfg=agent_cfg, device=device, **agent_kwargs)
+        return self._component(agent_class)(cfg=agent_cfg, device=device, **agent_kwargs)
 
     def run(self, mode: str = "train") -> None:
         """Run the training/evaluation
