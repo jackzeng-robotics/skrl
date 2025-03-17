@@ -11,10 +11,12 @@ from skrl.resources.preprocessors.torch import RunningStandardScaler  # noqa
 from skrl.resources.schedulers.torch import KLAdaptiveLR  # noqa
 from skrl.trainers.torch import Trainer
 from skrl.utils import set_seed
-
+from skrl.utils.model_instantiators.torch import deterministic_model, gaussian_model, shared_model
+from gymnasium.spaces import Box
+import numpy as np
 
 class Runner:
-    def __init__(self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]) -> None:
+    def __init__(self, path: str) -> None:
         """Experiment runner
 
         Class that configures and instantiates skrl components to execute training/evaluation workflows in a few lines of code
@@ -22,8 +24,7 @@ class Runner:
         :param env: Environment to train on
         :param cfg: Runner configuration
         """
-        self._env = env
-        self._cfg = cfg
+        self._cfg = self.load_cfg_from_yaml(path)
 
         # set random seed
         set_seed(self._cfg.get("seed", None))
@@ -41,6 +42,8 @@ class Runner:
     def trainer(self) -> Trainer:
         """Trainer instance"""
         return self._trainer
+        self._models = self._generate_models(copy.deepcopy(self._cfg))
+        self._agent = self._generate_agent(copy.deepcopy(self._cfg), self._models)
 
     @property
     def agent(self) -> Agent:
@@ -190,9 +193,7 @@ class Runner:
 
         return update_dict(copy.deepcopy(cfg))
 
-    def _generate_models(
-        self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
-    ) -> Mapping[str, Mapping[str, Model]]:
+    def _generate_models(self, cfg: Mapping[str, Any]) -> Mapping[str, Mapping[str, Model]]:
         """Generate model instances according to the environment specification and the given config
 
         :param env: Wrapped environment
@@ -200,302 +201,116 @@ class Runner:
 
         :return: Model instances
         """
-        multi_agent = isinstance(env, MultiAgentEnvWrapper)
-        device = env.device
-        possible_agents = env.possible_agents if multi_agent else ["agent"]
-        state_spaces = env.state_spaces if multi_agent else {"agent": env.state_space}
-        observation_spaces = env.observation_spaces if multi_agent else {"agent": env.observation_space}
-        action_spaces = env.action_spaces if multi_agent else {"agent": env.action_space}
+        # multi_agent = isinstance(env, MultiAgentEnvWrapper)
+        device = "cpu"
+        possible_agents = ["agent"]
+        state_spaces = {"agent": None}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
 
         agent_class = cfg.get("agent", {}).get("class", "").lower()
 
         # instantiate models
         models = {}
         for agent_id in possible_agents:
-            _cfg = copy.deepcopy(cfg)
             models[agent_id] = {}
-            models_cfg = _cfg.get("models")
-            if not models_cfg:
-                raise ValueError("No 'models' are defined in cfg")
-            # get separate (non-shared) configuration and remove 'separate' key
-            try:
-                separate = models_cfg["separate"]
-                del models_cfg["separate"]
-                del models_cfg["CTDE"]
-                del models_cfg["separate_actors"]
-                del models_cfg["separate_critics"]
-            except KeyError:
-                separate = True
-                logger.warning("No 'separate' field defined in 'models' cfg. Defining it as True by default")
             # non-shared models
-            if separate:
-                for role in models_cfg:
-                    # get instantiator function and remove 'class' key
-                    model_class = models_cfg[role].get("class")
-                    if not model_class:
-                        raise ValueError(f"No 'class' field defined in 'models:{role}' cfg")
-                    del models_cfg[role]["class"]
-                    model_class = self._component(model_class)
-                    # get specific spaces according to agent/model cfg
-                    observation_space = observation_spaces[agent_id]
-                    if agent_class == "mappo" and role == "value":
-                        observation_space = state_spaces[agent_id]
-                    if agent_class == "amp" and role == "discriminator":
-                        try:
-                            observation_space = env.amp_observation_space
-                        except Exception as e:
-                            logger.warning(
-                                "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
-                            )
-                    # print model source
-                    source = model_class(
-                        observation_space=observation_space,
-                        action_space=action_spaces[agent_id],
-                        device=device,
-                        **self._process_cfg(models_cfg[role]),
-                        return_source=True,
-                    )
-                    print("==================================================")
-                    print(f"Model (role): {role}")
-                    print("==================================================\n")
-                    print(source)
-                    print("--------------------------------------------------")
-                    # instantiate model
-                    models[agent_id][role] = model_class(
-                        observation_space=observation_space,
-                        action_space=action_spaces[agent_id],
-                        device=device,
-                        **self._process_cfg(models_cfg[role]),
-                    )
-            # shared models
-            else:
-                roles = list(models_cfg.keys())
-                if len(roles) != 2:
-                    raise ValueError(
-                        "Runner currently only supports shared models, made up of exactly two models. "
-                        "Set 'separate' field to True to create non-shared models for the given cfg"
-                    )
-                # get shared model structure and parameters
-                structure = []
-                parameters = []
-                for role in roles:
-                    # get instantiator function and remove 'class' key
-                    model_structure = models_cfg[role].get("class")
-                    if not model_structure:
-                        raise ValueError(f"No 'class' field defined in 'models:{role}' cfg")
-                    del models_cfg[role]["class"]
-                    structure.append(model_structure)
-                    parameters.append(self._process_cfg(models_cfg[role]))
-                model_class = self._component("Shared")
+            if _cfg["models"]["separate"]:
+                # get instantiator function and remove 'class' field
+                try:
+                    model_class = self._class(_cfg["models"]["policy"]["class"])
+                    del _cfg["models"]["policy"]["class"]
+                except KeyError:
+                    model_class = self._class("GaussianMixin")
+                    logger.warning("No 'class' field defined in 'models:policy' cfg. 'GaussianMixin' will be used as default")
                 # print model source
                 source = model_class(
                     observation_space=observation_spaces[agent_id],
                     action_space=action_spaces[agent_id],
                     device=device,
-                    structure=structure,
-                    roles=roles,
-                    parameters=parameters,
+                    **self._process_cfg(_cfg["models"]["policy"]),
                     return_source=True,
                 )
-                print("==================================================")
-                print(f"Shared model (roles): {roles}")
-                print("==================================================\n")
+                print("--------------------------------------------------\n")
                 print(source)
                 print("--------------------------------------------------")
                 # instantiate model
-                models[agent_id][roles[0]] = model_class(
+                models[agent_id]["policy"] = model_class(
                     observation_space=observation_spaces[agent_id],
                     action_space=action_spaces[agent_id],
                     device=device,
-                    structure=structure,
-                    roles=roles,
-                    parameters=parameters,
+                    **self._process_cfg(_cfg["models"]["policy"]),
                 )
-                models[agent_id][roles[1]] = models[agent_id][roles[0]]
-
-        # initialize lazy modules' parameters
-        for agent_id in possible_agents:
-            for role, model in models[agent_id].items():
-                model.init_state_dict(role)
-
-        return models
-    
-    def _generate_models_CTDE(
-        self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
-    ) -> Mapping[str, Mapping[str, Model]]:
-        """Generate model instances according to the environment specification and the given config
-
-        :param env: Wrapped environment
-        :param cfg: A configuration dictionary
-
-        :return: Model instances
-        """
-        multi_agent = isinstance(env, MultiAgentEnvWrapper)
-        device = env.device
-        possible_agents = env.possible_agents if multi_agent else ["agent"]
-        state_spaces = env.state_spaces if multi_agent else {"agent": env.state_space}
-        observation_spaces = env.observation_spaces if multi_agent else {"agent": env.observation_space}
-        action_spaces = env.action_spaces if multi_agent else {"agent": env.action_space}
-
-        agent_class = cfg.get("agent", {}).get("class", "").lower()
-
-        # instantiate models
-        models = {}
-        for agent_id in possible_agents:
-            models[agent_id] = {}
-        _cfg = copy.deepcopy(cfg)
-        models_cfg = _cfg.get("models")
-        if not models_cfg:
-            raise ValueError("No 'models' are defined in cfg")
-        # get separate (non-shared) configuration and remove 'separate' key
-        try:
-            separate = models_cfg["separate"]
-            separate_actors = models_cfg["separate_actors"]
-            separate_critics = models_cfg["separate_critics"]
-            del models_cfg["separate"]
-            del models_cfg["CTDE"]
-            del models_cfg["separate_actors"]
-            del models_cfg["separate_critics"]
-        except KeyError:
-            separate = True
-            logger.warning("No 'separate' field defined in 'models' cfg. Defining it as True by default")
-
-        # TODO: generalize this later
-        if separate:
-            if not separate_critics and separate_actors:
-                for role in models_cfg:
-                    if role =="policy":
-                        # instantiate models
-                        for agent_id in possible_agents:
-                            # get instantiator function and remove 'class' key
-                            model_class = models_cfg[role].get("class")
-                            model_class = self._component(model_class)
-                            # get specific spaces according to agent/model cfg
-                            observation_space = observation_spaces[agent_id]
-                            if agent_class == "mappo" and role == "value":
-                                observation_space = state_spaces[agent_id]
-                            if agent_class == "amp" and role == "discriminator":
-                                try:
-                                    observation_space = env.amp_observation_space
-                                except Exception as e:
-                                    logger.warning(
-                                        "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
-                                    )
-                            # print model source
-                            source = model_class(
-                                observation_space=observation_space,
-                                action_space=action_spaces[agent_id],
-                                device=device,
-                                **self._process_cfg(models_cfg[role]),
-                                return_source=True,
-                            )
-                            print("==================================================")
-                            print(f"Model (role): {role}")
-                            print("==================================================\n")
-                            print(source)
-                            print("--------------------------------------------------")
-                            # instantiate model
-                            models[agent_id][role] = model_class(
-                                observation_space=observation_space,
-                                action_space=action_spaces[agent_id],
-                                device=device,
-                                **self._process_cfg(models_cfg[role]),
-                            )
-                    elif role == "value":
-                        # get instantiator function and remove 'class' key
-                        model_class = models_cfg[role].get("class")
-                        if not model_class:
-                            raise ValueError(f"No 'class' field defined in 'models:{role}' cfg")
-                        del models_cfg[role]["class"]
-                        model_class = self._component(model_class)
-                        # get specific spaces according to agent/model cfg
-                        observation_space = observation_spaces[next(iter(possible_agents))] # assume the observation space is the same for all agents
-                        if agent_class == "mappo" and role == "value":
-                            observation_space = state_spaces[next(iter(possible_agents))] # assume the state space is the same for all agents
-                        if agent_class == "amp" and role == "discriminator":
-                            try:
-                                observation_space = env.amp_observation_space
-                            except Exception as e:
-                                logger.warning(
-                                    "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
-                                )
-                        # print model source
-                        source = model_class(
-                            observation_space=observation_space,
-                            action_space=action_spaces[next(iter(possible_agents))], # assume the action space is the same for all agents
-                            device=device,
-                            **self._process_cfg(models_cfg[role]),
-                            return_source=True,
-                        )
-                        print("==================================================")
-                        print(f"Model (role): {role}")
-                        print("==================================================\n")
-                        print(source)
-                        print("--------------------------------------------------")
-                        # instantiate model
-                        current_model = model_class(
-                            observation_space=observation_space,
-                            action_space=action_spaces[next(iter(possible_agents))], # assume the action space is the same for all agents
-                            device=device,
-                            **self._process_cfg(models_cfg[role]),
-                        )
-                        current_model.init_state_dict(role)
-                        
-                        for agent_id in possible_agents:
-                            models[agent_id][role] = current_model
-
-            elif not separate_actors and not separate_critics:
-                for role in models_cfg:
-                    # get instantiator function and remove 'class' key
-                    model_class = models_cfg[role].get("class")
-                    if not model_class:
-                        raise ValueError(f"No 'class' field defined in 'models:{role}' cfg")
-                    del models_cfg[role]["class"]
-                    model_class = self._component(model_class)
-                    # get specific spaces according to agent/model cfg
-                    observation_space = observation_spaces[next(iter(possible_agents))] # assume the observation space is the same for all agents
-                    if agent_class == "mappo" and role == "value":
-                        observation_space = state_spaces[next(iter(possible_agents))] # assume the state space is the same for all agents
-                    if agent_class == "amp" and role == "discriminator":
-                        try:
-                            observation_space = env.amp_observation_space
-                        except Exception as e:
-                            logger.warning(
-                                "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
-                            )
-                    # print model source
-                    source = model_class(
-                        observation_space=observation_space,
-                        action_space=action_spaces[next(iter(possible_agents))], # assume the action space is the same for all agents
-                        device=device,
-                        **self._process_cfg(models_cfg[role]),
-                        return_source=True,
-                    )
-                    print("==================================================")
-                    print(f"Model (role): {role}")
-                    print("==================================================\n")
-                    print(source)
-                    print("--------------------------------------------------")
-                    # instantiate model
-                    current_model = model_class(
-                        observation_space=observation_space,
-                        action_space=action_spaces[next(iter(possible_agents))], # assume the action space is the same for all agents
-                        device=device,
-                        **self._process_cfg(models_cfg[role]),
-                    )
-                    current_model.init_state_dict(role)
-                    
-                    for agent_id in possible_agents:
-                        models[agent_id][role] = current_model
+                # get instantiator function and remove 'class' field
+                try:
+                    model_class = self._class(_cfg["models"]["value"]["class"])
+                    del _cfg["models"]["value"]["class"]
+                except KeyError:
+                    model_class = self._class("DeterministicMixin")
+                    logger.warning("No 'class' field defined in 'models:value' cfg. 'DeterministicMixin' will be used as default")
+                # print model source
+                source = model_class(
+                    observation_space=(state_spaces if agent_class in [MAPPO] else observation_spaces)[agent_id],
+                    action_space=action_spaces[agent_id],
+                    device=device,
+                    **self._process_cfg(_cfg["models"]["value"]),
+                    return_source=True,
+                )
+                print("--------------------------------------------------\n")
+                print(source)
+                print("--------------------------------------------------")
+                # instantiate model
+                models[agent_id]["value"] = model_class(
+                    observation_space=(state_spaces if agent_class in [MAPPO] else observation_spaces)[agent_id],
+                    action_space=action_spaces[agent_id],
+                    device=device,
+                    **self._process_cfg(_cfg["models"]["value"]),
+                )
+            # shared models
+            else:
+                # remove 'class' field
+                try:
+                    del _cfg["models"]["policy"]["class"]
+                except KeyError:
+                    logger.warning("No 'class' field defined in 'models:policy' cfg. 'GaussianMixin' will be used as default")
+                try:
+                    del _cfg["models"]["value"]["class"]
+                except KeyError:
+                    logger.warning("No 'class' field defined in 'models:value' cfg. 'DeterministicMixin' will be used as default")
+                model_class = self._class("Shared")
+                # print model source
+                source = model_class(
+                    observation_space=observation_spaces[agent_id],
+                    action_space=action_spaces[agent_id],
+                    device=device,
+                    structure=None,
+                    roles=["policy", "value"],
+                    parameters=[
+                        self._process_cfg(_cfg["models"]["policy"]),
+                        self._process_cfg(_cfg["models"]["value"]),
+                    ],
+                    return_source=True,
+                )
+                print("--------------------------------------------------\n")
+                print(source)
+                print("--------------------------------------------------")
+                # instantiate model
+                models[agent_id]["policy"] = model_class(
+                    observation_space=observation_spaces[agent_id],
+                    action_space=action_spaces[agent_id],
+                    device=device,
+                    structure=None,
+                    roles=["policy", "value"],
+                    parameters=[
+                        self._process_cfg(_cfg["models"]["policy"]),
+                        self._process_cfg(_cfg["models"]["value"]),
+                    ],
+                )
+                models[agent_id]["value"] = models[agent_id]["policy"]
 
         return models
 
-    def _generate_agent(
-        self,
-        env: Union[Wrapper, MultiAgentEnvWrapper],
-        cfg: Mapping[str, Any],
-        models: Mapping[str, Mapping[str, Model]],
-    ) -> Agent:
+    def _generate_agent(self, cfg: Mapping[str, Any], models: Mapping[str, Mapping[str, Model]]) -> Agent:
         """Generate agent instance according to the environment specification and the given config and models
 
         :param env: Wrapped environment
@@ -504,17 +319,13 @@ class Runner:
 
         :return: Agent instances
         """
-        multi_agent = isinstance(env, MultiAgentEnvWrapper)
-        device = env.device
-        num_envs = env.num_envs
-        possible_agents = env.possible_agents if multi_agent else ["agent"]
-        state_spaces = env.state_spaces if multi_agent else {"agent": env.state_space}
-        observation_spaces = env.observation_spaces if multi_agent else {"agent": env.observation_space}
-        action_spaces = env.action_spaces if multi_agent else {"agent": env.action_space}
-
-        agent_class = cfg.get("agent", {}).get("class", "").lower()
-        if not agent_class:
-            raise ValueError(f"No 'class' field defined in 'agent' cfg")
+        # multi_agent = isinstance(env, MultiAgentEnvWrapper)
+        num_envs = 1
+        device = "cpu"
+        possible_agents = ["agent"]
+        state_spaces = {"agent": None}
+        observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
+        action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
 
         # check for memory configuration (backward compatibility)
         if not "memory" in cfg:
@@ -637,27 +448,6 @@ class Runner:
                 "possible_agents": possible_agents,
             }
         return self._component(agent_class)(cfg=agent_cfg, device=device, **agent_kwargs)
-
-    def _generate_trainer(
-        self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any], agent: Agent
-    ) -> Trainer:
-        """Generate trainer instance according to the environment specification and the given config and agent
-
-        :param env: Wrapped environment
-        :param cfg: A configuration dictionary
-        :param agent: Agent's model instances
-
-        :return: Trainer instances
-        """
-        # get trainer class and remove 'class' field
-        try:
-            trainer_class = self._component(cfg["trainer"]["class"])
-            del cfg["trainer"]["class"]
-        except KeyError:
-            trainer_class = self._component("SequentialTrainer")
-            logger.warning("No 'class' field defined in 'trainer' cfg. 'SequentialTrainer' will be used as default")
-        # instantiate trainer
-        return trainer_class(env=env, agents=agent, cfg=cfg["trainer"])
 
     def run(self, mode: str = "train") -> None:
         """Run the training/evaluation
