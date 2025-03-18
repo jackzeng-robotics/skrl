@@ -483,7 +483,7 @@ class Runner:
         # multi_agent = isinstance(env, MultiAgentEnvWrapper)
         num_envs = 1
         device = "cpu"
-        if len(self.possible_agents) > 1:
+        if hasattr(self, 'possible_agents') and len(self.possible_agents) > 1:
             possible_agents = self.possible_agents
             state_spaces = {agent: Box(-np.inf, np.inf, (cfg["models"]["state_space"],), np.float32) for agent in self.possible_agents}
             observation_spaces = {agent: Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32) for agent in self.possible_agents}
