@@ -35,9 +35,8 @@ class Runner:
             self.possible_agents = ["falcon1", "falcon2", "falcon3"]
             self._models = self._generate_models_CTDE(copy.deepcopy(self._cfg))
         else:
-            self._models = self._generate_models(self._env, copy.deepcopy(self._cfg))
-        self._agent = self._generate_agent(self._env, copy.deepcopy(self._cfg), self._models)
-        self._trainer = self._generate_trainer(self._env, copy.deepcopy(self._cfg), self._agent)
+            self._models = self._generate_models(copy.deepcopy(self._cfg))
+        self._agent = self._generate_agent(copy.deepcopy(self._cfg), self._models)
 
     @property
     def trainer(self) -> Trainer:
@@ -497,51 +496,7 @@ class Runner:
             memories[agent_id] = memory_class(num_envs=num_envs, device=device, **self._process_cfg(cfg["memory"]))
 
         # single-agent configuration and instantiation
-        if agent_class in ["amp"]:
-            agent_id = possible_agents[0]
-            try:
-                amp_observation_space = env.amp_observation_space
-            except Exception as e:
-                logger.warning(
-                    "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
-                )
-                amp_observation_space = observation_spaces[agent_id]
-            agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
-            agent_cfg.update(self._process_cfg(cfg["agent"]))
-            agent_cfg["state_preprocessor_kwargs"].update({"size": observation_spaces[agent_id], "device": device})
-            agent_cfg["value_preprocessor_kwargs"].update({"size": 1, "device": device})
-            agent_cfg["amp_state_preprocessor_kwargs"].update({"size": amp_observation_space, "device": device})
-
-            motion_dataset = None
-            if cfg.get("motion_dataset"):
-                motion_dataset_class = cfg["motion_dataset"].get("class")
-                if not motion_dataset_class:
-                    raise ValueError(f"No 'class' field defined in 'motion_dataset' cfg")
-                del cfg["motion_dataset"]["class"]
-                motion_dataset = self._component(motion_dataset_class)(
-                    device=device, **self._process_cfg(cfg.get("motion_dataset", {}))
-                )
-            reply_buffer = None
-            if cfg.get("reply_buffer"):
-                reply_buffer_class = cfg["reply_buffer"].get("class")
-                if not reply_buffer_class:
-                    raise ValueError(f"No 'class' field defined in 'reply_buffer' cfg")
-                del cfg["reply_buffer"]["class"]
-                reply_buffer = self._component(reply_buffer_class)(
-                    device=device, **self._process_cfg(cfg.get("reply_buffer", {}))
-                )
-
-            agent_kwargs = {
-                "models": models[agent_id],
-                "memory": memories[agent_id],
-                "observation_space": observation_spaces[agent_id],
-                "action_space": action_spaces[agent_id],
-                "amp_observation_space": amp_observation_space,
-                "motion_dataset": motion_dataset,
-                "reply_buffer": reply_buffer,
-                "collect_reference_motions": lambda num_samples: env.collect_reference_motions(num_samples),
-            }
-        elif agent_class in ["a2c", "cem", "ddpg", "ddqn", "dqn", "ppo", "rpo", "sac", "td3", "trpo"]:
+        if agent_class in ["a2c", "cem", "ddpg", "ddqn", "dqn", "ppo", "rpo", "sac", "td3", "trpo"]:
             agent_id = possible_agents[0]
             agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
             agent_cfg.update(self._process_cfg(cfg["agent"]))
