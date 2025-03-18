@@ -32,7 +32,7 @@ class Runner:
         self._cfg["agent"]["rewards_shaper"] = None  # FIXME: avoid 'dictionary changed size during iteration'
 
         if self._cfg["models"]["CTDE"]:
-            self._models = self._generate_models_CTDE(self._env, copy.deepcopy(self._cfg))
+            self._models = self._generate_models_CTDE(copy.deepcopy(self._cfg))
             self.possible_agents = ["falcon1", "falcon2", "falcon3"]
         else:
             self._models = self._generate_models(self._env, copy.deepcopy(self._cfg))
@@ -310,11 +310,10 @@ class Runner:
         return models
     
     def _generate_models_CTDE(
-        self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
+        self, cfg: Mapping[str, Any]
     ) -> Mapping[str, Mapping[str, Model]]:
         """Generate model instances according to the environment specification and the given config
 
-        :param env: Wrapped environment
         :param cfg: A configuration dictionary
 
         :return: Model instances
@@ -362,13 +361,6 @@ class Runner:
                             observation_space = observation_spaces[agent_id]
                             if agent_class == "mappo" and role == "value":
                                 observation_space = state_spaces[agent_id]
-                            if agent_class == "amp" and role == "discriminator":
-                                try:
-                                    observation_space = env.amp_observation_space
-                                except Exception as e:
-                                    logger.warning(
-                                        "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
-                                    )
                             # print model source
                             source = model_class(
                                 observation_space=observation_space,
@@ -400,13 +392,6 @@ class Runner:
                         observation_space = observation_spaces[next(iter(self.possible_agents))] # assume the observation space is the same for all agents
                         if agent_class == "mappo" and role == "value":
                             observation_space = state_spaces[next(iter(self.possible_agents))] # assume the state space is the same for all agents
-                        if agent_class == "amp" and role == "discriminator":
-                            try:
-                                observation_space = env.amp_observation_space
-                            except Exception as e:
-                                logger.warning(
-                                    "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
-                                )
                         # print model source
                         source = model_class(
                             observation_space=observation_space,
@@ -444,13 +429,6 @@ class Runner:
                     observation_space = observation_spaces[next(iter(self.possible_agents))] # assume the observation space is the same for all agents
                     if agent_class == "mappo" and role == "value":
                         observation_space = state_spaces[next(iter(self.possible_agents))] # assume the state space is the same for all agents
-                    if agent_class == "amp" and role == "discriminator":
-                        try:
-                            observation_space = env.amp_observation_space
-                        except Exception as e:
-                            logger.warning(
-                                "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
-                            )
                     # print model source
                     source = model_class(
                         observation_space=observation_space,
