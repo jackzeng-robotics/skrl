@@ -32,8 +32,8 @@ class Runner:
         self._cfg["agent"]["rewards_shaper"] = None  # FIXME: avoid 'dictionary changed size during iteration'
 
         if self._cfg["models"]["CTDE"]:
-            self._models = self._generate_models_CTDE(copy.deepcopy(self._cfg))
             self.possible_agents = ["falcon1", "falcon2", "falcon3"]
+            self._models = self._generate_models_CTDE(copy.deepcopy(self._cfg))
         else:
             self._models = self._generate_models(self._env, copy.deepcopy(self._cfg))
         self._agent = self._generate_agent(self._env, copy.deepcopy(self._cfg), self._models)
