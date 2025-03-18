@@ -343,6 +343,9 @@ class Runner:
             del models_cfg["CTDE"]
             del models_cfg["separate_actors"]
             del models_cfg["separate_critics"]
+            del models_cfg["state_space"]
+            del models_cfg["input_space"]
+            del models_cfg["action_space"]
         except KeyError:
             separate = True
             logger.warning("No 'separate' field defined in 'models' cfg. Defining it as True by default")
