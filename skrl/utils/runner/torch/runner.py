@@ -211,100 +211,113 @@ class Runner:
         # instantiate models
         models = {}
         for agent_id in possible_agents:
+            _cfg = copy.deepcopy(cfg)
             models[agent_id] = {}
+            models_cfg = _cfg.get("models")
+            if not models_cfg:
+                raise ValueError("No 'models' are defined in cfg")
+            # get separate (non-shared) configuration and remove 'separate' key
+            try:
+                separate = models_cfg["separate"]
+                del models_cfg["separate"]
+                del models_cfg["CTDE"]
+                del models_cfg["separate_actors"]
+                del models_cfg["separate_critics"]
+                del models_cfg["input_space"]
+                del models_cfg["action_space"]
+            except KeyError:
+                separate = True
+                logger.warning("No 'separate' field defined in 'models' cfg. Defining it as True by default")
             # non-shared models
-            if _cfg["models"]["separate"]:
-                # get instantiator function and remove 'class' field
-                try:
-                    model_class = self._class(_cfg["models"]["policy"]["class"])
-                    del _cfg["models"]["policy"]["class"]
-                except KeyError:
-                    model_class = self._class("GaussianMixin")
-                    logger.warning("No 'class' field defined in 'models:policy' cfg. 'GaussianMixin' will be used as default")
-                # print model source
-                source = model_class(
-                    observation_space=observation_spaces[agent_id],
-                    action_space=action_spaces[agent_id],
-                    device=device,
-                    **self._process_cfg(_cfg["models"]["policy"]),
-                    return_source=True,
-                )
-                print("--------------------------------------------------\n")
-                print(source)
-                print("--------------------------------------------------")
-                # instantiate model
-                models[agent_id]["policy"] = model_class(
-                    observation_space=observation_spaces[agent_id],
-                    action_space=action_spaces[agent_id],
-                    device=device,
-                    **self._process_cfg(_cfg["models"]["policy"]),
-                )
-                # get instantiator function and remove 'class' field
-                try:
-                    model_class = self._class(_cfg["models"]["value"]["class"])
-                    del _cfg["models"]["value"]["class"]
-                except KeyError:
-                    model_class = self._class("DeterministicMixin")
-                    logger.warning("No 'class' field defined in 'models:value' cfg. 'DeterministicMixin' will be used as default")
-                # print model source
-                source = model_class(
-                    observation_space=(state_spaces if agent_class in [MAPPO] else observation_spaces)[agent_id],
-                    action_space=action_spaces[agent_id],
-                    device=device,
-                    **self._process_cfg(_cfg["models"]["value"]),
-                    return_source=True,
-                )
-                print("--------------------------------------------------\n")
-                print(source)
-                print("--------------------------------------------------")
-                # instantiate model
-                models[agent_id]["value"] = model_class(
-                    observation_space=(state_spaces if agent_class in [MAPPO] else observation_spaces)[agent_id],
-                    action_space=action_spaces[agent_id],
-                    device=device,
-                    **self._process_cfg(_cfg["models"]["value"]),
-                )
+            if separate:
+                for role in models_cfg:
+                    # get instantiator function and remove 'class' key
+                    model_class = models_cfg[role].get("class")
+                    if not model_class:
+                        raise ValueError(f"No 'class' field defined in 'models:{role}' cfg")
+                    del models_cfg[role]["class"]
+                    model_class = self._component(model_class)
+                    # get specific spaces according to agent/model cfg
+                    observation_space = observation_spaces[agent_id]
+                    if agent_class == "mappo" and role == "value":
+                        observation_space = state_spaces[agent_id]
+                    if agent_class == "amp" and role == "discriminator":
+                        try:
+                            observation_space = env.amp_observation_space
+                        except Exception as e:
+                            logger.warning(
+                                "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
+                            )
+                    # print model source
+                    source = model_class(
+                        observation_space=observation_space,
+                        action_space=action_spaces[agent_id],
+                        device=device,
+                        **self._process_cfg(models_cfg[role]),
+                        return_source=True,
+                    )
+                    print("==================================================")
+                    print(f"Model (role): {role}")
+                    print("==================================================\n")
+                    print(source)
+                    print("--------------------------------------------------")
+                    # instantiate model
+                    models[agent_id][role] = model_class(
+                        observation_space=observation_space,
+                        action_space=action_spaces[agent_id],
+                        device=device,
+                        **self._process_cfg(models_cfg[role]),
+                    )
             # shared models
             else:
-                # remove 'class' field
-                try:
-                    del _cfg["models"]["policy"]["class"]
-                except KeyError:
-                    logger.warning("No 'class' field defined in 'models:policy' cfg. 'GaussianMixin' will be used as default")
-                try:
-                    del _cfg["models"]["value"]["class"]
-                except KeyError:
-                    logger.warning("No 'class' field defined in 'models:value' cfg. 'DeterministicMixin' will be used as default")
-                model_class = self._class("Shared")
+                roles = list(models_cfg.keys())
+                if len(roles) != 2:
+                    raise ValueError(
+                        "Runner currently only supports shared models, made up of exactly two models. "
+                        "Set 'separate' field to True to create non-shared models for the given cfg"
+                    )
+                # get shared model structure and parameters
+                structure = []
+                parameters = []
+                for role in roles:
+                    # get instantiator function and remove 'class' key
+                    model_structure = models_cfg[role].get("class")
+                    if not model_structure:
+                        raise ValueError(f"No 'class' field defined in 'models:{role}' cfg")
+                    del models_cfg[role]["class"]
+                    structure.append(model_structure)
+                    parameters.append(self._process_cfg(models_cfg[role]))
+                model_class = self._component("Shared")
                 # print model source
                 source = model_class(
                     observation_space=observation_spaces[agent_id],
                     action_space=action_spaces[agent_id],
                     device=device,
-                    structure=None,
-                    roles=["policy", "value"],
-                    parameters=[
-                        self._process_cfg(_cfg["models"]["policy"]),
-                        self._process_cfg(_cfg["models"]["value"]),
-                    ],
+                    structure=structure,
+                    roles=roles,
+                    parameters=parameters,
                     return_source=True,
                 )
-                print("--------------------------------------------------\n")
+                print("==================================================")
+                print(f"Shared model (roles): {roles}")
+                print("==================================================\n")
                 print(source)
                 print("--------------------------------------------------")
                 # instantiate model
-                models[agent_id]["policy"] = model_class(
+                models[agent_id][roles[0]] = model_class(
                     observation_space=observation_spaces[agent_id],
                     action_space=action_spaces[agent_id],
                     device=device,
-                    structure=None,
-                    roles=["policy", "value"],
-                    parameters=[
-                        self._process_cfg(_cfg["models"]["policy"]),
-                        self._process_cfg(_cfg["models"]["value"]),
-                    ],
+                    structure=structure,
+                    roles=roles,
+                    parameters=parameters,
                 )
-                models[agent_id]["value"] = models[agent_id]["policy"]
+                models[agent_id][roles[1]] = models[agent_id][roles[0]]
+
+        # initialize lazy modules' parameters
+        for agent_id in possible_agents:
+            for role, model in models[agent_id].items():
+                model.init_state_dict(role)
 
         return models
     
