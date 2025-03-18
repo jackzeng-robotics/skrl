@@ -475,6 +475,10 @@ class Runner:
         observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
         action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
 
+        agent_class = cfg.get("agent", {}).get("class", "").lower()
+        if not agent_class:
+            raise ValueError(f"No 'class' field defined in 'agent' cfg")
+
         # check for memory configuration (backward compatibility)
         if not "memory" in cfg:
             logger.warning(
@@ -495,13 +499,6 @@ class Runner:
         for agent_id in possible_agents:
             memories[agent_id] = memory_class(num_envs=num_envs, device=device, **self._process_cfg(cfg["memory"]))
         
-        # instantiate agent
-        try:
-            agent_class = self._class(cfg["agent"]["class"])
-            del cfg["agent"]["class"]
-        except KeyError:
-            agent_class = self._class("PPO")
-            logger.warning("No 'class' field defined in 'agent' cfg. 'PPO' will be used as default")
         # single-agent configuration and instantiation
         if agent_class in ["a2c", "cem", "ddpg", "ddqn", "dqn", "ppo", "rpo", "sac", "td3", "trpo"]:
             agent_id = possible_agents[0]
