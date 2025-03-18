@@ -494,7 +494,14 @@ class Runner:
             cfg["memory"]["memory_size"] = cfg["agent"]["rollouts"]  # memory_size is the agent's number of rollouts
         for agent_id in possible_agents:
             memories[agent_id] = memory_class(num_envs=num_envs, device=device, **self._process_cfg(cfg["memory"]))
-
+        
+        # instantiate agent
+        try:
+            agent_class = self._class(cfg["agent"]["class"])
+            del cfg["agent"]["class"]
+        except KeyError:
+            agent_class = self._class("PPO")
+            logger.warning("No 'class' field defined in 'agent' cfg. 'PPO' will be used as default")
         # single-agent configuration and instantiation
         if agent_class in ["a2c", "cem", "ddpg", "ddqn", "dqn", "ppo", "rpo", "sac", "td3", "trpo"]:
             agent_id = possible_agents[0]
