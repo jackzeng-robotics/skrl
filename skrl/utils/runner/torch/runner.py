@@ -470,10 +470,16 @@ class Runner:
         # multi_agent = isinstance(env, MultiAgentEnvWrapper)
         num_envs = 1
         device = "cpu"
-        possible_agents = ["agent"]
-        state_spaces = {"agent": None}
-        observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
-        action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
+        if len(self.possible_agents) > 1:
+            possible_agents = self.possible_agents
+            state_spaces = {agent: Box(-np.inf, np.inf, (cfg["models"]["state_space"],), np.float32) for agent in self.possible_agents}
+            observation_spaces = {agent: Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32) for agent in self.possible_agents}
+            action_spaces = {agent: Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32) for agent in self.possible_agents}
+        else:
+            possible_agents = ["agent"]
+            state_spaces = {"agent": None}
+            observation_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["input_space"],), np.float32)}
+            action_spaces = {"agent": Box(-np.inf, np.inf, (cfg["models"]["action_space"],), np.float32)}
 
         agent_class = cfg.get("agent", {}).get("class", "").lower()
         if not agent_class:
