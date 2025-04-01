@@ -380,6 +380,38 @@ class MAPPO(MultiAgent):
 
         return actions, log_prob, outputs
 
+    def act_onboard(self, states: Mapping[str, torch.Tensor], drone_name: str, timestep: int, timesteps: int) -> torch.Tensor:
+        """Process the environment's states to make a decision (actions) using the main policies
+
+        :param states: Environment's states
+        :type states: dictionary of torch.Tensor
+        :param timestep: Current timestep
+        :type timestep: int
+        :param timesteps: Number of timesteps
+        :type timesteps: int
+
+        :return: Actions
+        :rtype: torch.Tensor
+        """
+        # # sample random actions
+        # # TODO: fix for stochasticity, rnn and log_prob
+        # if timestep < self._random_timesteps:
+        #     return self.policy.random_act({"states": states}, role="policy")
+
+        # sample stochastic actions
+        with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+            data = self.policies[drone_name].act({"states": self._state_preprocessor[drone_name](states[drone_name])}, role="policy")
+
+            actions = {uid: d[0] for uid, d in zip(self.possible_agents, data)}
+            log_prob = {uid: d[1] for uid, d in zip(self.possible_agents, data)}
+            outputs = {uid: d[2] for uid, d in zip(self.possible_agents, data)}
+
+            actions = data[0]
+            log_prob = data[1]
+            outputs = data[2]
+
+        return actions, log_prob, outputs
+
     def record_transition(
         self,
         states: Mapping[str, torch.Tensor],
