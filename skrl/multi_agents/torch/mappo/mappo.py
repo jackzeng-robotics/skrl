@@ -15,7 +15,7 @@ from skrl.memories.torch import Memory
 from skrl.models.torch import Model
 from skrl.multi_agents.torch import MultiAgent
 from skrl.resources.schedulers.torch import KLAdaptiveLR
-
+from torch.optim import lr_scheduler
 
 # fmt: off
 # [start-config-dict-torch]
@@ -183,8 +183,10 @@ class MAPPO(MultiAgent):
         self._learning_rate = self._as_dict(self.cfg["learning_rate"])
         self._learning_rate_actor = self._as_dict(self.cfg["learning_rate_actor"])
         self._learning_rate_critic = self._as_dict(self.cfg["learning_rate_critic"])
-        self._learning_rate_scheduler = self._as_dict(self.cfg["learning_rate_scheduler"])
-        self._learning_rate_scheduler_kwargs = self._as_dict(self.cfg["learning_rate_scheduler_kwargs"])
+        self._learning_rate_scheduler_actor = self._as_dict(self.cfg["learning_rate_scheduler_actor"])
+        self._learning_rate_scheduler_actor_kwargs = self._as_dict(self.cfg["learning_rate_scheduler_actor_kwargs"])
+        self._learning_rate_scheduler_critic = self._as_dict(self.cfg["learning_rate_scheduler_critic"])
+        self._learning_rate_scheduler_critic_kwargs = self._as_dict(self.cfg["learning_rate_scheduler_critic_kwargs"])
 
         self._state_preprocessor = self._as_dict(self.cfg["state_preprocessor"])
         self._state_preprocessor_kwargs = self._as_dict(self.cfg["state_preprocessor_kwargs"])
@@ -213,7 +215,8 @@ class MAPPO(MultiAgent):
 
         # set up optimizer and learning rate scheduler
         self.optimizers = {}
-        self.schedulers = {}
+        self.schedulers_actor = {}
+        self.schedulers_critic = {}
 
         if self.cfg["separate_actors"]:
             for uid in self.possible_agents:
@@ -222,17 +225,29 @@ class MAPPO(MultiAgent):
                 if policy is not None and value is not None:
                     if policy is value:
                         optimizer = torch.optim.Adam(policy.parameters(), lr=self._learning_rate[uid])
+                        if self._learning_rate_scheduler_actor[uid] is not None:
+                            self.schedulers_critic[uid] = self._learning_rate_scheduler_actor[uid](
+                                optimizer, **self._learning_rate_scheduler_actor_kwargs[uid]
+                            )
+                        self.optimizers[uid] = optimizer
+                        self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
                     else:
-                        optimizer = torch.optim.Adam(
-                            itertools.chain(policy.parameters(), value.parameters()), lr=self._learning_rate[uid]
-                        )
-                    self.optimizers[uid] = optimizer
-                    if self._learning_rate_scheduler[uid] is not None:
-                        self.schedulers[uid] = self._learning_rate_scheduler[uid](
-                            optimizer, **self._learning_rate_scheduler_kwargs[uid]
-                        )
+                        optimizer_actor = torch.optim.Adam(policy.parameters(), lr=self._learning_rate_actor[self.agent_id])
+                        optimizer_critic = torch.optim.Adam(value.parameters(), lr=self._learning_rate_critic[self.agent_id])
 
-                self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
+                        if self._learning_rate_scheduler_actor[uid] is not None:
+                            scheduler = getattr(lr_scheduler, self._learning_rate_scheduler_actor[uid])
+                            self.schedulers_actor[uid] = scheduler(
+                                optimizer, **self._learning_rate_scheduler_actor_kwargs[uid]
+                            )
+                        if self._learning_rate_scheduler_critic[uid] is not None:
+                            scheduler = getattr(lr_scheduler, self._learning_rate_scheduler_critic[uid])
+                            self.schedulers_critic[uid] = scheduler(
+                                optimizer, **self._learning_rate_scheduler_critic_kwargs[uid]
+                            )
+                        self.optimizers[uid] = (optimizer_actor, optimizer_critic)
+                        self.checkpoint_modules[uid]["optimizer_actor"] = self.optimizers[uid][0]
+                        self.checkpoint_modules[uid]["optimizer_critic"] = self.optimizers[uid][1]
 
                 # set up preprocessors
                 if self._state_preprocessor[uid] is not None:
@@ -264,11 +279,17 @@ class MAPPO(MultiAgent):
                     optimizer_actor = torch.optim.Adam(policy.parameters(), lr=self._learning_rate_actor[self.agent_id])
                     optimizer_critic = torch.optim.Adam(value.parameters(), lr=self._learning_rate_critic[self.agent_id])
 
-                if self._learning_rate_scheduler[self.agent_id] is not None:
-                    scheduler = self._learning_rate_scheduler[self.agent_id](
-                        optimizer, **self._learning_rate_scheduler_kwargs[self.agent_id]
-                    )
                 for uid in self.possible_agents:
+                    if self._learning_rate_scheduler_actor[uid] is not None:
+                        scheduler = getattr(lr_scheduler, self._learning_rate_scheduler_actor[uid])
+                        self.schedulers_actor[uid] = scheduler(
+                            optimizer_actor, **self._learning_rate_scheduler_actor_kwargs[uid]
+                        )
+                    if self._learning_rate_scheduler_critic[uid] is not None:
+                        scheduler = getattr(lr_scheduler, self._learning_rate_scheduler_critic[uid])
+                        self.schedulers_critic[uid] = scheduler(
+                            optimizer_critic, **self._learning_rate_scheduler_critic_kwargs[uid]
+                        )
                     if policy is value:
                         self.optimizers[uid] = optimizer
                         self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
@@ -276,8 +297,6 @@ class MAPPO(MultiAgent):
                         self.optimizers[uid] = (optimizer_actor, optimizer_critic)
                         self.checkpoint_modules[uid]["optimizer_actor"] = self.optimizers[uid][0]
                         self.checkpoint_modules[uid]["optimizer_critic"] = self.optimizers[uid][1]
-                    if self._learning_rate_scheduler[self.agent_id] is not None:
-                        self.schedulers[uid] = scheduler
 
             # set up preprocessors
             if self._state_preprocessor[self.agent_id] is not None:
@@ -680,16 +699,27 @@ class MAPPO(MultiAgent):
                             cumulative_entropy_loss += entropy_loss.item()
 
                     # update learning rate
-                    if self._learning_rate_scheduler[uid]:
-                        if isinstance(self.schedulers[uid], KLAdaptiveLR):
+                    if self._learning_rate_scheduler_actor[uid]:
+                        if isinstance(self.schedulers_actor[uid], KLAdaptiveLR):
                             kl = torch.tensor(kl_divergences, device=self.device).mean()
                             # reduce (collect from all workers/processes) KL in distributed runs
                             if config.torch.is_distributed:
                                 torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
                                 kl /= config.torch.world_size
-                            self.schedulers[uid].step(kl.item())
+                            self.schedulers_actor[uid].step(kl.item())
                         else:
-                            self.schedulers[uid].step()
+                            self.schedulers_actor[uid].step()
+
+                    if self._learning_rate_scheduler_critic[uid]:
+                        if isinstance(self.schedulers_critic[uid], KLAdaptiveLR):
+                            kl = torch.tensor(kl_divergences, device=self.device).mean()
+                            # reduce (collect from all workers/processes) KL in distributed runs
+                            if config.torch.is_distributed:
+                                torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
+                                kl /= config.torch.world_size
+                            self.schedulers_critic[uid].step(kl.item())
+                        else:
+                            self.schedulers_critic[uid].step()
 
                 # record data
                 self.track_data(
@@ -713,8 +743,11 @@ class MAPPO(MultiAgent):
                 self.track_data(f"Policy / Gradient norm actor ({uid})", torch.tensor(actor_grad_norms).mean().item())
                 self.track_data(f"Policy / Gradient norm critic ({uid})", torch.tensor(critic_grad_norms).mean().item())
 
-                if self._learning_rate_scheduler[uid]:
-                    self.track_data(f"Learning / Learning rate ({uid})", self.schedulers[uid].get_last_lr()[0])
+                if self._learning_rate_scheduler_actor[uid]:
+                    self.track_data(f"Learning / Learning rate actor ({uid})", self.schedulers_actor[uid].get_last_lr()[0])
+
+                if self._learning_rate_scheduler_critic[uid]:
+                    self.track_data(f"Learning / Learning rate critic ({uid})", self.schedulers_critic[uid].get_last_lr()[0])
         else:
             policy = self.policies[self.agent_id]
             value = self.values[self.agent_id]
@@ -877,16 +910,27 @@ class MAPPO(MultiAgent):
                         cumulative_entropy_loss += entropy_loss.item()
 
                 # update learning rate
-                if self._learning_rate_scheduler[self.agent_id]:
-                    if isinstance(self.schedulers[self.agent_id], KLAdaptiveLR):
+                if self._learning_rate_scheduler_actor[uid]:
+                    if isinstance(self.schedulers_actor[uid], KLAdaptiveLR):
                         kl = torch.tensor(kl_divergences, device=self.device).mean()
                         # reduce (collect from all workers/processes) KL in distributed runs
                         if config.torch.is_distributed:
                             torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
                             kl /= config.torch.world_size
-                        self.schedulers[self.agent_id].step(kl.item())
+                        self.schedulers_actor[uid].step(kl.item())
                     else:
-                        self.schedulers[self.agent_id].step()
+                        self.schedulers_actor[uid].step()
+
+                if self._learning_rate_scheduler_critic[uid]:
+                    if isinstance(self.schedulers_critic[uid], KLAdaptiveLR):
+                        kl = torch.tensor(kl_divergences, device=self.device).mean()
+                        # reduce (collect from all workers/processes) KL in distributed runs
+                        if config.torch.is_distributed:
+                            torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
+                            kl /= config.torch.world_size
+                        self.schedulers_critic[uid].step(kl.item())
+                    else:
+                        self.schedulers_critic[uid].step()
 
         
             # record data
@@ -911,8 +955,11 @@ class MAPPO(MultiAgent):
             self.track_data(f"Policy / Gradient norm actor", torch.tensor(actor_grad_norms).mean().item())
             self.track_data(f"Policy / Gradient norm critic", torch.tensor(critic_grad_norms).mean().item())
 
-            if self._learning_rate_scheduler[uid]:
-                self.track_data(f"Learning / Learning rate", self.schedulers[uid].get_last_lr()[0])
+            if self._learning_rate_scheduler_actor[uid]:
+                self.track_data(f"Learning / Learning rate actor ({uid})", self.schedulers_actor[uid].get_last_lr()[0])
+
+            if self._learning_rate_scheduler_critic[uid]:
+                self.track_data(f"Learning / Learning rate critic ({uid})", self.schedulers_critic[uid].get_last_lr()[0])
                 
         self.track_data("Performance / Learning time", time.time() - start)
 
