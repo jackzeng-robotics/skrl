@@ -402,10 +402,6 @@ class MAPPO(MultiAgent):
         with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
             data = self.policies[drone_name].act({"states": self._state_preprocessor[drone_name](states)}, role="policy")
 
-            actions = {uid: d[0] for uid, d in zip(self.possible_agents, data)}
-            log_prob = {uid: d[1] for uid, d in zip(self.possible_agents, data)}
-            outputs = {uid: d[2] for uid, d in zip(self.possible_agents, data)}
-
             actions = data[0]
             log_prob = data[1]
             outputs = data[2]
