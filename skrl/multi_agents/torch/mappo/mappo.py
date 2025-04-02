@@ -822,6 +822,20 @@ class MAPPO(MultiAgent):
                     sampled_returns,
                     sampled_advantages,
                 ) in sampled_batches:
+                    
+                    # advantage filtering: drop 50% lowest advantages
+                    advantages_magnitude = torch.abs(sampled_advantages.squeeze())
+                    sorted_idx = torch.argsort(advantages_magnitude)
+                    n_keep = len(advantages_magnitude) // 2
+                    sampled_idx = sorted_idx[n_keep:]
+
+                    sampled_states = sampled_states[sampled_idx]
+                    sampled_shared_states = sampled_shared_states[sampled_idx]
+                    sampled_actions = sampled_actions[sampled_idx]
+                    sampled_log_prob = sampled_log_prob[sampled_idx]
+                    sampled_values = sampled_values[sampled_idx]
+                    sampled_returns = sampled_returns[sampled_idx]
+                    sampled_advantages = sampled_advantages[sampled_idx]
 
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
 
