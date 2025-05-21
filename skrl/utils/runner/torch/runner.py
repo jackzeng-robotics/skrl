@@ -356,6 +356,7 @@ class Runner:
             del models_cfg["CTDE"]
             del models_cfg["separate_actors"]
             del models_cfg["separate_critics"]
+            del models_cfg["possible_agents"]
             del models_cfg["state_space"]
             del models_cfg["input_space"]
             del models_cfg["action_space"]
