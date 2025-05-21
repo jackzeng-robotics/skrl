@@ -32,7 +32,7 @@ class Runner:
         self._cfg["agent"]["rewards_shaper"] = None  # FIXME: avoid 'dictionary changed size during iteration'
 
         if self._cfg["models"]["CTDE"]:
-            self.possible_agents = ["falcon1", "falcon2", "falcon3"]
+            self.possible_agents = self._cfg["models"]["possible_agents"]
             self._models = self._generate_models_CTDE(copy.deepcopy(self._cfg))
         else:
             self._models = self._generate_models(copy.deepcopy(self._cfg))
@@ -223,6 +223,7 @@ class Runner:
                 del models_cfg["CTDE"]
                 del models_cfg["separate_actors"]
                 del models_cfg["separate_critics"]
+                del models_cfg["possible_agents"]
                 del models_cfg["input_space"]
                 del models_cfg["action_space"]
             except KeyError:
