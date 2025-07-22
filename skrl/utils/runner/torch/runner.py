@@ -225,6 +225,7 @@ class Runner:
                 del models_cfg["CTDE"]
                 del models_cfg["separate_actors"]
                 del models_cfg["separate_critics"]
+                del models_cfg["local_critics"]
             except KeyError:
                 separate = True
                 logger.warning("No 'separate' field defined in 'models' cfg. Defining it as True by default")
@@ -483,10 +484,12 @@ class Runner:
             separate = models_cfg["separate"]
             separate_actors = models_cfg["separate_actors"]
             separate_critics = models_cfg["separate_critics"]
+            local_critics = models_cfg["local_critics"]
             del models_cfg["separate"]
             del models_cfg["CTDE"]
             del models_cfg["separate_actors"]
             del models_cfg["separate_critics"]
+            del models_cfg["local_critics"]
         except KeyError:
             separate = True
             logger.warning("No 'separate' field defined in 'models' cfg. Defining it as True by default")
@@ -542,7 +545,8 @@ class Runner:
                         # get specific spaces according to agent/model cfg
                         observation_space = observation_spaces[next(iter(possible_agents))] # assume the observation space is the same for all agents
                         if agent_class == "mappo" and role == "value":
-                            observation_space = state_spaces[next(iter(possible_agents))] # assume the state space is the same for all agents
+                            if not local_critics:
+                                observation_space = state_spaces[next(iter(possible_agents))] # assume the state space is the same for all agents
                         if agent_class == "amp" and role == "discriminator":
                             try:
                                 observation_space = env.amp_observation_space
@@ -586,7 +590,8 @@ class Runner:
                     # get specific spaces according to agent/model cfg
                     observation_space = observation_spaces[next(iter(possible_agents))] # assume the observation space is the same for all agents
                     if agent_class == "mappo" and role == "value":
-                        observation_space = state_spaces[next(iter(possible_agents))] # assume the state space is the same for all agents
+                        if not local_critics:
+                            observation_space = state_spaces[next(iter(possible_agents))] # assume the state space is the same for all agents
                     if agent_class == "amp" and role == "discriminator":
                         try:
                             observation_space = env.amp_observation_space
@@ -761,18 +766,21 @@ class Runner:
             agent_cfg["state_preprocessor_kwargs"].update(
                 {agent_id: {"size": observation_spaces[agent_id], "device": device} for agent_id in possible_agents}
             )
-            agent_cfg["shared_state_preprocessor_kwargs"].update(
-                {agent_id: {"size": state_spaces[agent_id], "device": device} for agent_id in possible_agents}
-            )
+            if not cfg["models"]["local_critics"]:
+                agent_cfg["shared_state_preprocessor_kwargs"].update(
+                    {agent_id: {"size": state_spaces[agent_id], "device": device} for agent_id in possible_agents}
+                )
             agent_cfg["value_preprocessor_kwargs"].update({"size": 1, "device": device})
             agent_kwargs = {
                 "models": models,
                 "memories": memories,
                 "observation_spaces": observation_spaces,
                 "action_spaces": action_spaces,
-                "shared_observation_spaces": state_spaces,
                 "possible_agents": possible_agents,
             }
+            if not cfg["models"]["local_critics"]:
+                agent_kwargs["shared_observation_spaces"] = state_spaces
+
         return self._component(agent_class)(cfg=agent_cfg, device=device, **agent_kwargs)
 
     def _generate_trainer(

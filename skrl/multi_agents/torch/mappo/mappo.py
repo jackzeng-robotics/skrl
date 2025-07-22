@@ -126,7 +126,8 @@ class MAPPO(MultiAgent):
             cfg=_cfg,
         )
         self._track_mean_reward = None
-        self.shared_observation_spaces = shared_observation_spaces
+        if cfg["use_state_space"]:
+            self.shared_observation_spaces = shared_observation_spaces
 
         # models
         if self.cfg["separate_actors"]:
@@ -190,8 +191,11 @@ class MAPPO(MultiAgent):
 
         self._state_preprocessor = self._as_dict(self.cfg["state_preprocessor"])
         self._state_preprocessor_kwargs = self._as_dict(self.cfg["state_preprocessor_kwargs"])
-        self._shared_state_preprocessor = self._as_dict(self.cfg["shared_state_preprocessor"])
-        self._shared_state_preprocessor_kwargs = self._as_dict(self.cfg["shared_state_preprocessor_kwargs"])
+        if cfg["use_state_space"]:
+            self._shared_state_preprocessor = self._as_dict(self.cfg["shared_state_preprocessor"])
+            self._shared_state_preprocessor_kwargs = self._as_dict(self.cfg["shared_state_preprocessor_kwargs"])
+        else:
+            self._shared_state_preprocessor = self._as_dict(None)
         self._value_preprocessor = self._as_dict(self.cfg["value_preprocessor"])
         self._value_preprocessor_kwargs = self._as_dict(self.cfg["value_preprocessor_kwargs"])
 
@@ -339,9 +343,10 @@ class MAPPO(MultiAgent):
         if self.memories:
             for uid in self.possible_agents:
                 self.memories[uid].create_tensor(name="states", size=self.observation_spaces[uid], dtype=torch.float32)
-                self.memories[uid].create_tensor(
-                    name="shared_states", size=self.shared_observation_spaces[uid], dtype=torch.float32
-                )
+                if self.cfg["use_state_space"]:
+                    self.memories[uid].create_tensor(
+                        name="shared_states", size=self.shared_observation_spaces[uid], dtype=torch.float32
+                    )
                 self.memories[uid].create_tensor(name="actions", size=self.action_spaces[uid], dtype=torch.float32)
                 self.memories[uid].create_tensor(name="rewards", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="terminated", size=1, dtype=torch.bool)
@@ -352,19 +357,25 @@ class MAPPO(MultiAgent):
                 self.memories[uid].create_tensor(name="advantages", size=1, dtype=torch.float32)
 
                 # tensors sampled during training
-                self._tensors_names = [
-                    "states",
-                    "shared_states",
-                    "actions",
-                    "log_prob",
-                    "values",
-                    "returns",
-                    "advantages",
-                ]
+                if self.cfg["use_state_space"]:
+                    self._tensors_names = [
+                        "states",
+                        "shared_states",
+                        "actions",
+                        "log_prob",
+                        "values",
+                        "returns",
+                        "advantages",
+                    ]
+                else:
+                    self._tensors_names = ["states", "actions", "log_prob", "values", "returns", "advantages"]
 
         # create temporary variables needed for storage and computation
         self._current_log_prob = []
-        self._current_shared_next_states = []
+        if self.cfg["use_state_space"]:
+            self._current_shared_next_states = []
+        else:
+            self._current_next_states = []
 
     def act(self, states: Mapping[str, torch.Tensor], timestep: int, timesteps: int) -> torch.Tensor:
         """Process the environment's states to make a decision (actions) using the main policies
@@ -437,8 +448,11 @@ class MAPPO(MultiAgent):
         )
         mean_rewards = 0
         if self.memories:
-            shared_states = infos["shared_states"]
-            self._current_shared_next_states = infos["shared_next_states"]
+            if self.cfg["use_state_space"]:
+                shared_states = infos["shared_states"]
+                self._current_shared_next_states = infos["shared_next_states"]
+            else:
+                self._current_next_states = next_states
 
             for uid in self.possible_agents:
                 # reward shaping
@@ -447,9 +461,14 @@ class MAPPO(MultiAgent):
 
                 # compute values
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-                    values, _, _ = self.values[uid].act(
-                        {"states": self._shared_state_preprocessor[uid](shared_states)}, role="value"
-                    )
+                    if self.cfg["use_state_space"]:
+                        values, _, _ = self.values[uid].act(
+                            {"states": self._shared_state_preprocessor[uid](shared_states)}, role="value"
+                        )
+                    else:
+                        values, _, _ = self.values[uid].act(
+                            {"states": self._state_preprocessor[uid](states[uid])}, role="value"
+                        )
                     values = self._value_preprocessor[uid](values, inverse=True)
 
                 # time-limit (truncation) bootstrapping
@@ -459,18 +478,29 @@ class MAPPO(MultiAgent):
                 mean_rewards += rewards[uid].mean().item()
 
                 # storage transition in memory
-                self.memories[uid].add_samples(
-                    states=states[uid],
-                    actions=actions[uid],
-                    rewards=rewards[uid],
-                    next_states=next_states[uid],
-                    terminated=terminated[uid],
-                    truncated=truncated[uid],
-                    log_prob=self._current_log_prob[uid],
-                    values=values,
-                    shared_states=shared_states,
-                )
-            
+                if self.cfg["use_state_space"]:
+                    self.memories[uid].add_samples(
+                        states=states[uid],
+                        actions=actions[uid],
+                        rewards=rewards[uid],
+                        next_states=next_states[uid],
+                        terminated=terminated[uid],
+                        truncated=truncated[uid],
+                        log_prob=self._current_log_prob[uid],
+                        values=values,
+                        shared_states=shared_states,
+                    )
+                else:
+                    self.memories[uid].add_samples(
+                        states=states[uid],
+                        actions=actions[uid],
+                        rewards=rewards[uid],
+                        next_states=next_states[uid],
+                        terminated=terminated[uid],
+                        truncated=truncated[uid],
+                        log_prob=self._current_log_prob[uid],
+                        values=values,
+                    )
             self._track_mean_reward = mean_rewards
 
     def pre_interaction(self, timestep: int, timesteps: int) -> None:
@@ -565,10 +595,16 @@ class MAPPO(MultiAgent):
                 # compute returns and advantages
                 with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
                     value.train(False)
-                    last_values, _, _ = value.act(
-                        {"states": self._shared_state_preprocessor[uid](self._current_shared_next_states.float())},
-                        role="value",
-                    )
+                    if self.cfg["use_state_space"]:
+                        last_values, _, _ = value.act(
+                            {"states": self._shared_state_preprocessor[uid](self._current_shared_next_states.float())},
+                            role="value",
+                        )
+                    else:
+                        last_values, _, _ = value.act(
+                            {"states": self._state_preprocessor[uid](self._current_next_states)},
+                            role="value",
+                        )
                     value.train(True)
                 last_values = self._value_preprocessor[uid](last_values, inverse=True)
 
@@ -601,22 +637,34 @@ class MAPPO(MultiAgent):
                     kl_divergences = []
 
                     # mini-batches loop
-                    for (
-                        sampled_states,
-                        sampled_shared_states,
-                        sampled_actions,
-                        sampled_log_prob,
-                        sampled_values,
-                        sampled_returns,
-                        sampled_advantages,
-                    ) in sampled_batches:
+                    for batch in sampled_batches:
+                        if len(batch) == 7:
+                            (
+                                sampled_states,
+                                sampled_shared_states,
+                                sampled_actions,
+                                sampled_log_prob,
+                                sampled_values,
+                                sampled_returns,
+                                sampled_advantages,
+                            ) = batch
+                        else:
+                            (
+                                sampled_states,
+                                sampled_actions,
+                                sampled_log_prob,
+                                sampled_values,
+                                sampled_returns,
+                                sampled_advantages,
+                            ) = batch
 
                         with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
 
                             sampled_states = self._state_preprocessor[uid](sampled_states, train=not epoch)
-                            sampled_shared_states = self._shared_state_preprocessor[uid](
-                                sampled_shared_states, train=not epoch
-                            )
+                            if self.cfg["use_state_space"]:
+                                sampled_shared_states = self._shared_state_preprocessor[uid](
+                                    sampled_shared_states, train=not epoch
+                                )
 
                             _, next_log_prob, _ = policy.act(
                                 {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
@@ -648,7 +696,10 @@ class MAPPO(MultiAgent):
                             policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
 
                             # compute value loss
-                            predicted_values, _, _ = value.act({"states": sampled_shared_states}, role="value")
+                            if self.cfg["use_state_space"]:
+                                predicted_values, _, _ = value.act({"states": sampled_shared_states}, role="value")
+                            else:
+                                predicted_values, _, _ = value.act({"states": sampled_states}, role="value")
 
                             if self._clip_predicted_values:
                                 predicted_values = sampled_values + torch.clip(
@@ -750,17 +801,18 @@ class MAPPO(MultiAgent):
                     self.track_data(f"Learning / Learning rate critic ({uid})", self.schedulers_critic[uid].get_last_lr()[0])
         else:
             policy = self.policies[self.agent_id]
-            value = self.values[self.agent_id]
+            if self.cfg["use_state_space"]:
+                value = self.values[self.agent_id]
  
-            # compute returns and advantages
-            with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-                value.train(False)
-                last_values, _, _ = value.act(
-                    {"states": self._shared_state_preprocessor[self.agent_id](self._current_shared_next_states.float())},
-                    role="value",
-                )
-                value.train(True)
-            last_values = self._value_preprocessor[self.agent_id](last_values, inverse=True)
+                # compute returns and advantages
+                with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+                    value.train(False)
+                    last_values, _, _ = value.act(
+                        {"states": self._shared_state_preprocessor[self.agent_id](self._current_shared_next_states.float())},
+                        role="value",
+                    )
+                    value.train(True)
+                last_values = self._value_preprocessor[self.agent_id](last_values, inverse=True)
 
             sampled_batches_agents = {}
 
@@ -768,6 +820,12 @@ class MAPPO(MultiAgent):
             for uid in self.possible_agents:
                 memory = self.memories[uid]
                 values = memory.get_tensor_by_name("values")
+                if not self.cfg["use_state_space"]:
+                    value = self.values[uid]
+                    last_values, _, _ = value.act(
+                        {"states": self._state_preprocessor[uid](self._current_next_states[uid])},
+                        role="value",
+                    )
                 returns, advantages = compute_gae(
                     rewards=memory.get_tensor_by_name("rewards"),
                     dones=memory.get_tensor_by_name("terminated") | memory.get_tensor_by_name("truncated"),
@@ -813,15 +871,26 @@ class MAPPO(MultiAgent):
                 kl_divergences = []
 
                 # mini-batches loop
-                for (
-                    sampled_states,
-                    sampled_shared_states,
-                    sampled_actions,
-                    sampled_log_prob,
-                    sampled_values,
-                    sampled_returns,
-                    sampled_advantages,
-                ) in sampled_batches:
+                for batch in sampled_batches:
+                    if len(batch) == 7:
+                        (
+                            sampled_states,
+                            sampled_shared_states,
+                            sampled_actions,
+                            sampled_log_prob,
+                            sampled_values,
+                            sampled_returns,
+                            sampled_advantages,
+                        ) = batch
+                    else:
+                        (
+                            sampled_states,
+                            sampled_actions,
+                            sampled_log_prob,
+                            sampled_values,
+                            sampled_returns,
+                            sampled_advantages,
+                        ) = batch
                     
                     # advantage filtering: drop 50% lowest advantages
                     advantages_magnitude = torch.abs(sampled_advantages.squeeze())
@@ -830,7 +899,8 @@ class MAPPO(MultiAgent):
                     sampled_idx = sorted_idx[n_keep:]
 
                     sampled_states = sampled_states[sampled_idx]
-                    sampled_shared_states = sampled_shared_states[sampled_idx]
+                    if self.cfg["use_state_space"]:
+                        sampled_shared_states = sampled_shared_states[sampled_idx]
                     sampled_actions = sampled_actions[sampled_idx]
                     sampled_log_prob = sampled_log_prob[sampled_idx]
                     sampled_values = sampled_values[sampled_idx]
@@ -840,9 +910,10 @@ class MAPPO(MultiAgent):
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
 
                         sampled_states = self._state_preprocessor[self.agent_id](sampled_states, train=not epoch)
-                        sampled_shared_states = self._shared_state_preprocessor[self.agent_id](
-                            sampled_shared_states, train=not epoch
-                        )
+                        if self.cfg["use_state_space"]:
+                            sampled_shared_states = self._shared_state_preprocessor[uid](
+                                sampled_shared_states, train=not epoch
+                            )
 
                         _, next_log_prob, _ = policy.act(
                             {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
@@ -874,7 +945,10 @@ class MAPPO(MultiAgent):
                         policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
 
                         # compute value loss
-                        predicted_values, _, _ = value.act({"states": sampled_shared_states}, role="value")
+                        if self.cfg["use_state_space"]:
+                                predicted_values, _, _ = value.act({"states": sampled_shared_states}, role="value")
+                        else:
+                            predicted_values, _, _ = value.act({"states": sampled_states}, role="value")
 
                         if self._clip_predicted_values:
                             predicted_values = sampled_values + torch.clip(
