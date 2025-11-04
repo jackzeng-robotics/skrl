@@ -125,6 +125,7 @@ class MAPPO(MultiAgent):
             device=device,
             cfg=_cfg,
         )
+        self.shared_observation_spaces = shared_observation_spaces
         self._track_mean_reward = None
         if cfg["use_state_space"]:
             self.shared_observation_spaces = shared_observation_spaces

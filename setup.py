@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="skrl",
-    version="1.3.0",
+    version="1.4.3",
     description="Modular and flexible library for reinforcement learning on PyTorch and JAX",
     author="Toni-SM",
     author_email="",
