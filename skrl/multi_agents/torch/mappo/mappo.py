@@ -209,6 +209,22 @@ class MAPPO(MultiAgent):
             else:
                 self._value_preprocessor[uid] = self._empty_preprocessor
 
+        # Parameter sharing: the agents must also share their preprocessors. `_optimize` runs a
+        # single pooled update under the first agent's uid, so only that agent's preprocessors
+        # would ever be fitted (`train=True`); the others would keep their initial statistics and
+        # feed the shared networks differently normalized inputs at action time.
+        if self.cfg.shared_across_agents:
+            reference = self.possible_agents[0]
+            for uid in self.possible_agents[1:]:
+                for preprocessors, name in (
+                    (self._observation_preprocessor, "observation_preprocessor"),
+                    (self._state_preprocessor, "state_preprocessor"),
+                    (self._value_preprocessor, "value_preprocessor"),
+                ):
+                    preprocessors[uid] = preprocessors[reference]
+                    if name in self.checkpoint_modules[reference]:
+                        self.checkpoint_modules[uid][name] = preprocessors[reference]
+
     def init(self, *, trainer_cfg: dict[str, Any] | None = None) -> None:
         """Initialize the agent.
 

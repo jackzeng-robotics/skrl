@@ -461,3 +461,41 @@ def test_advantage_filter_ratio_shrinks_the_batch(device):
         torch.tensor([i for i in range(advantages.shape[0]) if i not in set(index.tolist())], device=device)
     ].abs()
     assert kept.min() >= dropped_max.max(), "filtering must keep the largest-magnitude advantages"
+
+
+@pytest.mark.parametrize("device", ["cpu"])
+def test_shared_across_agents_shares_preprocessors(device):
+    """Parameter sharing must share preprocessors, not just networks.
+
+    Only the first agent's preprocessors are fitted (the pooled update runs under its uid), so
+    unshared preprocessors would leave the other agents feeding the shared networks differently
+    normalized inputs at action time.
+    """
+    if not is_device_available(device, backend="torch"):
+        pytest.skip(f"Device {device} not available")
+
+    rollouts = 4
+    env, models, memories = _build_shared_setup(num_agents=3, num_envs=2, rollouts=rollouts, device=device)
+    agent = MultiAgent(
+        possible_agents=env.possible_agents,
+        models=models,
+        memories=memories,
+        cfg=_shared_cfg(
+            rollouts=rollouts,
+            observation_preprocessor=RunningStandardScaler,
+            observation_preprocessor_kwargs={"size": env.observation_space("agent_0"), "device": device},
+            state_preprocessor=RunningStandardScaler,
+            state_preprocessor_kwargs={"size": env.state_space("agent_0"), "device": device},
+            value_preprocessor=RunningStandardScaler,
+            value_preprocessor_kwargs={"size": 1, "device": device},
+        ),
+        observation_spaces=env.observation_spaces,
+        state_spaces=env.state_spaces,
+        action_spaces=env.action_spaces,
+        device=env.device,
+    )
+    reference = env.possible_agents[0]
+    for uid in env.possible_agents[1:]:
+        assert agent._observation_preprocessor[uid] is agent._observation_preprocessor[reference]
+        assert agent._state_preprocessor[uid] is agent._state_preprocessor[reference]
+        assert agent._value_preprocessor[uid] is agent._value_preprocessor[reference]
