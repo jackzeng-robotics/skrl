@@ -49,6 +49,8 @@ from ...utilities import MultiAgentEnv, check_config_keys, get_test_mixed_precis
     rewards_shaper=st.one_of(st.none(), st.just(lambda rewards, *args, **kwargs: 0.5 * rewards)),
     time_limit_bootstrap=st.booleans(),
     mixed_precision=st.booleans(),
+    separate_optimizers=st.booleans(),
+    advantage_filter_ratio=st.floats(min_value=0, max_value=0.9),
 )
 @hypothesis.settings(
     suppress_health_check=[hypothesis.HealthCheck.function_scoped_fixture],
@@ -92,6 +94,8 @@ def test_agent(
     rewards_shaper,
     time_limit_bootstrap,
     mixed_precision,
+    separate_optimizers,
+    advantage_filter_ratio,
 ):
     # check device availability
     if not is_device_available(device, backend="torch"):
@@ -213,6 +217,9 @@ def test_agent(
         "rewards_shaper": rewards_shaper,
         "time_limit_bootstrap": time_limit_bootstrap,
         "mixed_precision": get_test_mixed_precision(mixed_precision),
+        "separate_optimizers": separate_optimizers,
+        "shared_across_agents": False,
+        "advantage_filter_ratio": advantage_filter_ratio,
         "experiment": {
             "directory": "",
             "experiment_name": "",
@@ -260,3 +267,197 @@ def test_agent(
                 raise e
     else:
         trainer.train()
+
+
+def _build_shared_setup(*, num_agents, num_envs, rollouts, device):
+    """Build a MAPPO setup whose policy/value instances are shared by every agent."""
+    observation_spaces, state_spaces, action_spaces = {}, {}, {}
+    for i in range(num_agents):
+        uid = f"agent_{i}"
+        observation_spaces[uid] = gymnasium.spaces.Box(low=-1, high=1, shape=(num_agents,))
+        state_spaces[uid] = gymnasium.spaces.Box(low=-1, high=1, shape=(6,))
+        action_spaces[uid] = gymnasium.spaces.Box(low=-1, high=1, shape=(num_agents - 1,))
+
+    env = MultiAgentEnv(
+        observation_spaces=observation_spaces,
+        state_spaces=state_spaces,
+        action_spaces=action_spaces,
+        num_envs=num_envs,
+        device=device,
+        ml_framework="torch",
+    )
+
+    reference = env.possible_agents[0]
+    policy = gaussian_model(
+        observation_space=env.observation_space(reference),
+        state_space=env.state_space(reference),
+        action_space=env.action_space(reference),
+        device=env.device,
+        network=[{"name": "net", "input": "OBSERVATIONS", "layers": [5], "activations": "relu"}],
+        output="ACTIONS",
+    )
+    value = deterministic_model(
+        observation_space=env.observation_space(reference),
+        state_space=env.state_space(reference),
+        action_space=env.action_space(reference),
+        device=env.device,
+        network=[{"name": "net", "input": "STATES", "layers": [5], "activations": "relu"}],
+        output="ONE",
+    )
+    policy.init_state_dict(role="policy")
+    value.init_state_dict(role="value")
+
+    # every agent points at the same two instances (parameter sharing)
+    models = {uid: {"policy": policy, "value": value} for uid in env.possible_agents}
+    memories = {
+        uid: RandomMemory(memory_size=rollouts, num_envs=env.num_envs, device=env.device)
+        for uid in env.possible_agents
+    }
+    return env, models, memories
+
+
+def _shared_cfg(*, rollouts, **overrides):
+    cfg = {
+        "rollouts": rollouts,
+        "learning_epochs": 1,
+        "mini_batches": 1,
+        "learning_rate": 1.0e-3,
+        "shared_across_agents": True,
+        "experiment": {"directory": "", "experiment_name": "", "write_interval": 0, "checkpoint_interval": 0},
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+@pytest.mark.parametrize("num_agents", [2, 3])
+def test_shared_across_agents_pools_transitions(device, num_agents):
+    """Parameter sharing must pool every agent's transitions into a single optimization step.
+
+    Looping over agents instead would take ``num_agents`` steps on the same parameters per
+    mini-batch, which is a different (and wrong) estimator.
+    """
+    if not is_device_available(device, backend="torch"):
+        pytest.skip(f"Device {device} not available")
+
+    rollouts, num_envs = 4, 3
+    env, models, memories = _build_shared_setup(
+        num_agents=num_agents, num_envs=num_envs, rollouts=rollouts, device=device
+    )
+    agent = MultiAgent(
+        possible_agents=env.possible_agents,
+        models=models,
+        memories=memories,
+        cfg=_shared_cfg(rollouts=rollouts),
+        observation_spaces=env.observation_spaces,
+        state_spaces=env.state_spaces,
+        action_spaces=env.action_spaces,
+        device=env.device,
+    )
+
+    # the shared batch must be num_agents times a single agent's batch
+    seen_batch_sizes = []
+    original = agent._sample_mini_batches
+
+    def spy(*, uid, uids):
+        batches = original(uid=uid, uids=uids)
+        seen_batch_sizes.append((len(uids), batches[0][0].shape[0]))
+        return batches
+
+    agent._sample_mini_batches = spy
+
+    trainer = SequentialTrainer(
+        cfg={
+            "timesteps": int(2 * rollouts),
+            "headless": True,
+            "disable_progressbar": True,
+            "close_environment_at_exit": False,
+        },
+        env=env,
+        agents=agent,
+    )
+    trainer.train()
+
+    assert seen_batch_sizes, "the update never ran"
+    for pooled_agents, batch_size in seen_batch_sizes:
+        assert pooled_agents == num_agents, "parameter sharing must pool every agent"
+        assert batch_size == num_agents * rollouts * num_envs, "pooled batch has the wrong size"
+
+
+@pytest.mark.parametrize("device", ["cpu"])
+def test_shared_across_agents_rejects_unshared_models(device):
+    """Enabling parameter sharing with per-agent model instances must fail loudly."""
+    if not is_device_available(device, backend="torch"):
+        pytest.skip(f"Device {device} not available")
+
+    rollouts = 4
+    env, models, memories = _build_shared_setup(num_agents=2, num_envs=2, rollouts=rollouts, device=device)
+
+    # break the sharing for one agent
+    other = env.possible_agents[1]
+    models[other] = {
+        "policy": gaussian_model(
+            observation_space=env.observation_space(other),
+            state_space=env.state_space(other),
+            action_space=env.action_space(other),
+            device=env.device,
+            network=[{"name": "net", "input": "OBSERVATIONS", "layers": [5], "activations": "relu"}],
+            output="ACTIONS",
+        ),
+        "value": models[other]["value"],
+    }
+
+    with pytest.raises(ValueError, match="shared_across_agents"):
+        MultiAgent(
+            possible_agents=env.possible_agents,
+            models=models,
+            memories=memories,
+            cfg=_shared_cfg(rollouts=rollouts),
+            observation_spaces=env.observation_spaces,
+            state_spaces=env.state_spaces,
+            action_spaces=env.action_spaces,
+            device=env.device,
+        )
+
+
+@pytest.mark.parametrize("device", ["cpu"])
+def test_separate_optimizers_builds_two_optimizers(device):
+    """`separate_optimizers` must give the policy and value networks their own optimizer and LR."""
+    if not is_device_available(device, backend="torch"):
+        pytest.skip(f"Device {device} not available")
+
+    rollouts = 4
+    env, models, memories = _build_shared_setup(num_agents=2, num_envs=2, rollouts=rollouts, device=device)
+    agent = MultiAgent(
+        possible_agents=env.possible_agents,
+        models=models,
+        memories=memories,
+        cfg=_shared_cfg(rollouts=rollouts, separate_optimizers=True, learning_rate=(1.0e-3, 5.0e-4)),
+        observation_spaces=env.observation_spaces,
+        state_spaces=env.state_spaces,
+        action_spaces=env.action_spaces,
+        device=env.device,
+    )
+    for uid in env.possible_agents:
+        assert agent.value_optimizers[uid] is not None, "value optimizer was not created"
+        assert agent.optimizers[uid].param_groups[0]["lr"] == pytest.approx(1.0e-3)
+        assert agent.value_optimizers[uid].param_groups[0]["lr"] == pytest.approx(5.0e-4)
+
+
+@pytest.mark.parametrize("device", ["cpu"])
+def test_advantage_filter_ratio_shrinks_the_batch(device):
+    """`advantage_filter_ratio` must drop the requested fraction of each mini-batch."""
+    if not is_device_available(device, backend="torch"):
+        pytest.skip(f"Device {device} not available")
+
+    advantages = torch.arange(-5, 5, dtype=torch.float32, device=device).reshape(-1, 1)
+    ratio = 0.5
+    keep = int(advantages.shape[0] * (1.0 - ratio))
+    index = torch.topk(advantages.abs().flatten(), keep, sorted=False).indices
+
+    assert index.numel() == keep == 5
+    kept = advantages.flatten()[index].abs()
+    dropped_max = advantages.flatten()[
+        torch.tensor([i for i in range(advantages.shape[0]) if i not in set(index.tolist())], device=device)
+    ].abs()
+    assert kept.min() >= dropped_max.max(), "filtering must keep the largest-magnitude advantages"
