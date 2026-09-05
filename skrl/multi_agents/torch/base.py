@@ -85,7 +85,9 @@ class MultiAgentCfg(ABC):
             if isinstance(value, dict):
                 if set(value) >= set(possible_agents):
                     continue
-                elif set(value) < set(possible_agents):
+                # an empty dict is a value to broadcast (e.g. the default `*_kwargs`), not a
+                # partially-specified per-agent mapping
+                elif value and set(value) < set(possible_agents):
                     raise ValueError(
                         f"Specified keys ({set(value)}) do not match possible agents ({set(possible_agents)})"
                     )
