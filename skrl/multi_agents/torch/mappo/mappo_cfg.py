@@ -63,6 +63,45 @@ class MAPPO_CFG(MultiAgentCfg):
     * If a tuple is provided, its elements will be used for each network in order.
     """
 
+    separate_optimizers: bool = False
+    """Whether to optimize the policy and value networks with separate optimizers.
+
+    If ``False`` (default, upstream behavior), a single optimizer spans both networks using the
+    first element of :attr:`learning_rate`. If ``True`` and the policy and value networks are
+    distinct instances, two optimizers (and two learning rate schedulers) are built, taking the
+    first and second elements of :attr:`learning_rate`, :attr:`learning_rate_scheduler` and
+    :attr:`learning_rate_scheduler_kwargs` respectively.
+
+    This has no effect when the policy and value networks are the same instance (shared model),
+    since a single parameter set cannot be split across two optimizers.
+    """
+
+    shared_across_agents: bool = False
+    """Whether all agents share the same model instances (parameter sharing).
+
+    When ``True``, the agents' transitions are pooled into a single batch and the shared
+    parameters are updated **once** per learning epoch. This is not the same as updating the
+    shared parameters once per agent (which is what looping over agents would do), and it is the
+    correct estimator for parameter sharing.
+
+    Set by the runner when ``models.shared_across_agents`` is enabled; it must agree with how the
+    models were instantiated, so it is validated in :meth:`MAPPO.__init__`.
+    """
+
+    advantage_filter_ratio: float | dict[str, float] = 0.0
+    """Fraction of each mini-batch to drop, keeping the largest-magnitude advantages.
+
+    ``0.0`` (default) disables filtering. ``0.5`` keeps the half of the mini-batch with the
+    largest ``|advantage|``.
+
+    Range: ``[0.0, 1.0)``.
+
+    .. warning::
+
+        Filtering biases the gradient estimator. It is off by default and should be treated as an
+        experimental knob. The reported losses are averaged over the samples actually used.
+    """
+
     observation_preprocessor: type | None | dict[str, type | None] = None
     """Preprocessor class to process the environment's observations.
 
@@ -142,7 +181,16 @@ class MAPPO_CFG(MultiAgentCfg):
         """Expand the configuration."""
         super().expand(
             possible_agents=possible_agents,
-            immutable=["learning_starts", "mixed_precision", "random_timesteps", "rewards_shaper", "rollouts"],
+            immutable=[
+                "learning_starts",
+                "mixed_precision",
+                "random_timesteps",
+                "rewards_shaper",
+                "rollouts",
+                # global (not per-agent) switches
+                "separate_optimizers",
+                "shared_across_agents",
+            ],
         )
         for uid in possible_agents:
             # learning rate

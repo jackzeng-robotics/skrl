@@ -129,16 +129,39 @@ class MAPPO(MultiAgent):
         else:
             self.scaler = torch.cuda.amp.GradScaler(enabled=self.cfg.mixed_precision)
 
+        # validate parameter sharing: every agent must map to the same model instances
+        if self.cfg.shared_across_agents:
+            reference = self.possible_agents[0]
+            for uid in self.possible_agents[1:]:
+                if self.policies[uid] is not self.policies[reference] or self.values[uid] is not self.values[reference]:
+                    raise ValueError(
+                        "'shared_across_agents' is enabled but the agents do not share the same model instances. "
+                        "Set 'models.shared_across_agents' in the runner configuration, or pass the same model "
+                        "instances for every agent."
+                    )
+
         # set up optimizer and learning rate scheduler
         self.optimizers = {}
         self.schedulers = {}
+        # separate value optimizers/schedulers (None unless cfg.separate_optimizers and policy is not value)
+        self.value_optimizers = {uid: None for uid in self.possible_agents}
+        self.value_schedulers = {uid: None for uid in self.possible_agents}
         for uid in self.possible_agents:
             if self.policies[uid] is not None and self.values[uid] is not None:
+                separate = self.cfg.separate_optimizers and self.policies[uid] is not self.values[uid]
                 # - optimizers
                 if self.policies[uid] is self.values[uid]:
                     self.optimizers[uid] = torch.optim.Adam(
                         self.policies[uid].parameters(), lr=self.cfg.learning_rate[uid][0]
                     )
+                elif separate:
+                    self.optimizers[uid] = torch.optim.Adam(
+                        self.policies[uid].parameters(), lr=self.cfg.learning_rate[uid][0]
+                    )
+                    self.value_optimizers[uid] = torch.optim.Adam(
+                        self.values[uid].parameters(), lr=self.cfg.learning_rate[uid][1]
+                    )
+                    self.checkpoint_modules[uid]["value_optimizer"] = self.value_optimizers[uid]
                 else:
                     self.optimizers[uid] = torch.optim.Adam(
                         itertools.chain(self.policies[uid].parameters(), self.values[uid].parameters()),
@@ -150,6 +173,10 @@ class MAPPO(MultiAgent):
                 if self.schedulers[uid] is not None:
                     self.schedulers[uid] = self.cfg.learning_rate_scheduler[uid][0](
                         self.optimizers[uid], **self.cfg.learning_rate_scheduler_kwargs[uid][0]
+                    )
+                if separate and self.cfg.learning_rate_scheduler[uid][1] is not None:
+                    self.value_schedulers[uid] = self.cfg.learning_rate_scheduler[uid][1](
+                        self.value_optimizers[uid], **self.cfg.learning_rate_scheduler_kwargs[uid][1]
                     )
 
         # set up preprocessors
@@ -357,8 +384,13 @@ class MAPPO(MultiAgent):
             if not self._rollout % self.cfg.rollouts and timestep >= self.cfg.learning_starts:
                 with ScopedTimer() as timer:
                     self.enable_models_training_mode(True)
-                    for uid in self.possible_agents:
-                        self.update(timestep=timestep, timesteps=timesteps, uid=uid)
+                    if self.cfg.shared_across_agents:
+                        # parameter sharing: pool every agent's transitions and update the shared
+                        # parameters once, rather than once per agent
+                        self.update_shared(timestep=timestep, timesteps=timesteps)
+                    else:
+                        for uid in self.possible_agents:
+                            self.update(timestep=timestep, timesteps=timesteps, uid=uid)
                     self.enable_models_training_mode(False)
                     self.track_data("Stats / Algorithm update time (ms)", timer.elapsed_time_ms)
 
@@ -372,7 +404,28 @@ class MAPPO(MultiAgent):
         :param timesteps: Number of timesteps.
         :param uid: Agent ID.
         """
-        policy = self.policies[uid]
+        self._compute_returns_and_advantages(uid=uid)
+        self._optimize(uid=uid, uids=[uid])
+
+    def update_shared(self, *, timestep: int, timesteps: int) -> None:
+        """Algorithm's update step for models shared across agents (parameter sharing).
+
+        Returns and advantages are computed per agent (each agent has its own memory and its own
+        value preprocessor statistics), then every agent's transitions are pooled into a single
+        batch so the shared parameters take one optimization step per mini-batch.
+
+        :param timestep: Current timestep.
+        :param timesteps: Number of timesteps.
+        """
+        for uid in self.possible_agents:
+            self._compute_returns_and_advantages(uid=uid)
+        self._optimize(uid=self.possible_agents[0], uids=self.possible_agents)
+
+    def _compute_returns_and_advantages(self, *, uid: str) -> None:
+        """Bootstrap the last value and write returns/advantages into the agent's memory.
+
+        :param uid: Agent ID.
+        """
         value = self.values[uid]
         memory = self.memories[uid]
 
@@ -403,6 +456,41 @@ class MAPPO(MultiAgent):
         memory.set_tensor_by_name("returns", self._value_preprocessor[uid](returns, train=True))
         memory.set_tensor_by_name("advantages", advantages)
 
+    def _sample_mini_batches(self, *, uid: str, uids: list[str]) -> list[list[torch.Tensor]]:
+        """Sample mini-batches, pooling across ``uids`` when more than one agent is given.
+
+        :param uid: Agent ID whose mini-batch count is used.
+        :param uids: Agent IDs whose memories are pooled.
+
+        :return: Mini-batches of tensors ordered as :attr:`_tensors_names`.
+        """
+        mini_batches = self.cfg.mini_batches[uid]
+        if len(uids) == 1:
+            return self.memories[uid].sample(
+                names=self._tensors_names, batch_size=len(self.memories[uid]), mini_batches=mini_batches
+            )
+        # pool agents: one concatenation per (mini-batch, tensor) rather than an incremental
+        # accumulate-in-a-loop, which would copy O(len(uids)^2) data
+        per_agent = [
+            self.memories[u].sample(
+                names=self._tensors_names, batch_size=len(self.memories[u]), mini_batches=mini_batches
+            )
+            for u in uids
+        ]
+        return [
+            [torch.cat([batches[i][t] for batches in per_agent], dim=0) for t in range(len(self._tensors_names))]
+            for i in range(mini_batches)
+        ]
+
+    def _optimize(self, *, uid: str, uids: list[str]) -> None:
+        """Run the learning epochs for one set of shared models.
+
+        :param uid: Agent ID owning the models, optimizers, preprocessors and hyperparameters.
+        :param uids: Agent IDs whose memories feed the update (``[uid]`` unless parameter sharing).
+        """
+        policy = self.policies[uid]
+        value = self.values[uid]
+
         cumulative_policy_loss = 0
         cumulative_entropy_loss = 0
         cumulative_value_loss = 0
@@ -411,7 +499,7 @@ class MAPPO(MultiAgent):
         for epoch in range(self.cfg.learning_epochs[uid]):
             kl_divergences = []
 
-            # mini-batches loop
+            # mini-batches loop (re-sampled every epoch for per-epoch shuffling)
             for (
                 sampled_observations,
                 sampled_states,
@@ -420,9 +508,30 @@ class MAPPO(MultiAgent):
                 sampled_values,
                 sampled_returns,
                 sampled_advantages,
-            ) in memory.sample(
-                names=self._tensors_names, batch_size=len(memory), mini_batches=self.cfg.mini_batches[uid]
-            ):
+            ) in self._sample_mini_batches(uid=uid, uids=uids):
+
+                # advantage filtering: keep the largest-magnitude advantages
+                if self.cfg.advantage_filter_ratio[uid] > 0:
+                    keep = int(sampled_advantages.shape[0] * (1.0 - self.cfg.advantage_filter_ratio[uid]))
+                    if keep > 0:
+                        index = torch.topk(sampled_advantages.abs().flatten(), keep, sorted=False).indices
+                        (
+                            sampled_observations,
+                            sampled_states,
+                            sampled_actions,
+                            sampled_log_prob,
+                            sampled_values,
+                            sampled_returns,
+                            sampled_advantages,
+                        ) = (
+                            sampled_observations[index],
+                            sampled_states[index],
+                            sampled_actions[index],
+                            sampled_log_prob[index],
+                            sampled_values[index],
+                            sampled_returns[index],
+                            sampled_advantages[index],
+                        )
 
                 with torch.autocast(device_type=self._device_type, enabled=self.cfg.mixed_precision):
                     inputs = {
@@ -470,7 +579,10 @@ class MAPPO(MultiAgent):
                     value_loss = self.cfg.value_loss_scale[uid] * F.mse_loss(sampled_returns, predicted_values)
 
                 # optimization step
+                value_optimizer = self.value_optimizers[uid]
                 self.optimizers[uid].zero_grad()
+                if value_optimizer is not None:
+                    value_optimizer.zero_grad()
                 self.scaler.scale(policy_loss + entropy_loss + value_loss).backward()
 
                 if config.torch.is_distributed:
@@ -482,12 +594,18 @@ class MAPPO(MultiAgent):
                     self.scaler.unscale_(self.optimizers[uid])
                     if policy is value:
                         nn.utils.clip_grad_norm_(policy.parameters(), self.cfg.grad_norm_clip[uid])
+                    elif value_optimizer is not None:
+                        self.scaler.unscale_(value_optimizer)
+                        nn.utils.clip_grad_norm_(policy.parameters(), self.cfg.grad_norm_clip[uid])
+                        nn.utils.clip_grad_norm_(value.parameters(), self.cfg.grad_norm_clip[uid])
                     else:
                         nn.utils.clip_grad_norm_(
                             itertools.chain(policy.parameters(), value.parameters()), self.cfg.grad_norm_clip[uid]
                         )
 
                 self.scaler.step(self.optimizers[uid])
+                if value_optimizer is not None:
+                    self.scaler.step(value_optimizer)
                 self.scaler.update()
 
                 # update cumulative losses
@@ -497,16 +615,20 @@ class MAPPO(MultiAgent):
                     cumulative_entropy_loss += entropy_loss.item()
 
             # update learning rate
-            if self.schedulers[uid]:
-                if isinstance(self.schedulers[uid], KLAdaptiveLR):
-                    kl = torch.tensor(kl_divergences, device=self.device).mean()
-                    # reduce (collect from all workers/processes) KL in distributed runs
-                    if config.torch.is_distributed:
-                        torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
-                        kl /= config.torch.world_size
-                    self.schedulers[uid].step(kl.item())
+            kl = None
+            for scheduler in (self.schedulers[uid], self.value_schedulers[uid]):
+                if not scheduler:
+                    continue
+                if isinstance(scheduler, KLAdaptiveLR):
+                    if kl is None:
+                        kl = torch.tensor(kl_divergences, device=self.device).mean()
+                        # reduce (collect from all workers/processes) KL in distributed runs
+                        if config.torch.is_distributed:
+                            torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
+                            kl /= config.torch.world_size
+                    scheduler.step(kl.item())
                 else:
-                    self.schedulers[uid].step()
+                    scheduler.step()
 
         # record data
         self.track_data(
@@ -527,3 +649,5 @@ class MAPPO(MultiAgent):
 
         if self.schedulers[uid]:
             self.track_data(f"Learning / Learning rate ({uid})", self.schedulers[uid].get_last_lr()[0])
+        if self.value_schedulers[uid]:
+            self.track_data(f"Learning / Value learning rate ({uid})", self.value_schedulers[uid].get_last_lr()[0])

@@ -115,6 +115,69 @@ class Runner:
             del cfg["agent"]["shared_state_preprocessor"]
             if "shared_state_preprocessor_kwargs" in cfg["agent"]:
                 del cfg["agent"]["shared_state_preprocessor_kwargs"]
+
+        # --- compatibility with the pre-2.0 CTDE fork configuration ---------------------------
+        # setdefault (not get) so the mutations below land on the real cfg
+        agent_cfg = cfg.setdefault("agent", {})
+        models_cfg = cfg.setdefault("models", {})
+
+        # 'CTDE' / 'use_state_space' / 'local_critics' are no longer agent switches: whether a
+        # critic is centralized is now decided by what the value model reads (STATES vs
+        # OBSERVATIONS) in its 'inputs' specification.
+        for key, owner in (("CTDE", models_cfg), ("local_critics", models_cfg), ("use_state_space", agent_cfg)):
+            if key in owner:
+                logger.warning(
+                    f"The '{key}' field in the configuration is deprecated and ignored. A centralized critic is now "
+                    "expressed by giving the value model 'inputs: STATES' (use 'inputs: OBSERVATIONS' for a local "
+                    "critic)"
+                )
+                del owner[key]
+
+        # 'separate_actors'/'separate_critics' (models or agent) -> 'shared_across_agents'
+        for key in ("separate_actors", "separate_critics"):
+            for owner in (models_cfg, agent_cfg):
+                if key in owner:
+                    logger.warning(
+                        f"The '{key}' field in the configuration is deprecated. "
+                        "Use 'models.shared_across_agents' instead (note the inverted meaning)"
+                    )
+                    if not owner[key]:
+                        models_cfg["shared_across_agents"] = True
+                    del owner[key]
+
+        # separate actor/critic learning rates -> 'learning_rate: [policy, value]'
+        if "learning_rate_actor" in agent_cfg or "learning_rate_critic" in agent_cfg:
+            logger.warning(
+                "The 'learning_rate_actor'/'learning_rate_critic' fields in the configuration are deprecated. "
+                "Use 'learning_rate: [policy, value]' together with 'separate_optimizers: true' instead"
+            )
+            default_lr = agent_cfg.get("learning_rate", 1e-3)
+            agent_cfg["learning_rate"] = [
+                agent_cfg.pop("learning_rate_actor", default_lr),
+                agent_cfg.pop("learning_rate_critic", default_lr),
+            ]
+            agent_cfg["separate_optimizers"] = True
+
+        # separate actor/critic learning rate schedulers -> tuple form
+        for suffix in ("", "_kwargs"):
+            actor_key = f"learning_rate_scheduler_actor{suffix}"
+            critic_key = f"learning_rate_scheduler_critic{suffix}"
+            if actor_key in agent_cfg or critic_key in agent_cfg:
+                logger.warning(
+                    f"The '{actor_key}'/'{critic_key}' fields in the configuration are deprecated. "
+                    f"Use 'learning_rate_scheduler{suffix}: [policy, value]' instead"
+                )
+                default = agent_cfg.get(f"learning_rate_scheduler{suffix}", {} if suffix else None)
+                agent_cfg[f"learning_rate_scheduler{suffix}"] = [
+                    agent_cfg.pop(actor_key, default),
+                    agent_cfg.pop(critic_key, default),
+                ]
+                agent_cfg["separate_optimizers"] = True
+
+        # the agent must agree with how the models were instantiated
+        if models_cfg.get("shared_across_agents"):
+            agent_cfg["shared_across_agents"] = True
+
         return cfg
 
     def _component(self, name: str) -> Type:
@@ -218,6 +281,9 @@ class Runner:
                     if key in _direct_eval:
                         if isinstance(value, str):
                             d[key] = eval(value)
+                        # per-network (policy, value) specification
+                        elif isinstance(value, (list, tuple)):
+                            d[key] = tuple(eval(item) if isinstance(item, str) else item for item in value)
                     elif key.endswith("_kwargs"):
                         d[key] = value if value is not None else {}
             return d
@@ -258,9 +324,16 @@ class Runner:
             raise ValueError(f"The 'agent.class' field is not defined in the specified configuration")
         agent_class = agent_class.lower()
 
+        # cross-agent parameter sharing: instantiate once and alias to every agent
+        shared_across_agents = bool(cfg.get("models", {}).pop("shared_across_agents", False))
+
         # instantiate models
         models = {}
         for agent_id in possible_agents:
+            # parameter sharing: reuse the first agent's instances
+            if shared_across_agents and agent_id != possible_agents[0]:
+                models[agent_id] = models[possible_agents[0]]
+                continue
             _cfg = copy.deepcopy(cfg)
             models[agent_id] = {}
             models_cfg = _cfg.get("models")
@@ -369,9 +442,13 @@ class Runner:
                 )
                 models[agent_id][roles[1]] = models[agent_id][roles[0]]
 
-        # initialize lazy modules' parameters
+        # initialize lazy modules' parameters (once per distinct instance under parameter sharing)
+        initialized = set()
         for agent_id in possible_agents:
             for role, model in models[agent_id].items():
+                if id(model) in initialized:
+                    continue
+                initialized.add(id(model))
                 model.init_state_dict(role=role)
 
         return models
